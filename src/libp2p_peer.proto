@@ -14,7 +14,8 @@ message peer {
     repeated bytes connected = 3;
     nat_type nat_type = 4;
     int64 timestamp = 5;
-    map<string, association_list> associations = 6;
+    // Do NOT re-use this field ID. Associations are no longer used
+    // map<string, association_list> associations = 6;
     bytes network_id = 7;
     map<string, metadata_value> signed_metadata = 8;
 }
@@ -26,15 +27,6 @@ message metadata_value {
         bytes bin = 3;
         bool boolean = 4;
     }
-}
-
-message association_list {
-    repeated association associations = 1;
-}
-
-message association {
-    bytes pubkey = 1;
-    bytes signature = 2;
 }
 
 message signed_peer {

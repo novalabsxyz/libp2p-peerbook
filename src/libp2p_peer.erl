@@ -43,10 +43,13 @@ from_map(Map, SigFun) ->
                            connected = maps:get(connected, Map, []),
                            nat_type=maps:get(nat_type, Map),
                            network_id=maps:get(network_id, Map, <<>>),
-                           timestamp=Timestamp,
-                           signed_metadata=encode_map(maps:get(signed_metadata, Map, #{}))
-                          },
-    sign_peer(Peer, SigFun).
+                           timestamp=Timestamp},
+    case encode_map(maps:get(signed_metadata, Map, #{})) of
+        {error, Error} ->
+            {error, Error};
+        {ok, MD} ->
+            sign_peer(Peer#libp2p_peer_pb{signed_metadata = MD}, SigFun)
+    end.
 
 %% @doc Gets the public key for the given peer.
 -spec pubkey_bin(peer()) -> libp2p_crypto:pubkey_bin().
@@ -85,7 +88,7 @@ signed_metadata(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{signed_metadata=MD}}
              end, #{}, MD).
 
 %% @doc Gets a key from the signed metadata of the given peer
--spec signed_metadata_get(peer(), any(), any()) -> any().
+-spec signed_metadata_get(peer(), Key::binary(), Default::any()) -> any().
 signed_metadata_get(Peer, Key, Default) ->
     maps:get(Key, signed_metadata(Peer), Default).
 
@@ -97,21 +100,21 @@ metadata(#libp2p_signed_peer_pb{metadata=Metadata}) ->
     Metadata.
 
 %% @doc Replaces the full metadata for a given peer
--spec metadata_set(peer(), metadata()) -> peer().
+-spec metadata_set(peer(), metadata()) -> {ok, peer()} | {error, term()}.
 metadata_set(Peer=#libp2p_signed_peer_pb{}, Metadata) when is_list(Metadata) ->
-    Peer#libp2p_signed_peer_pb{metadata=Metadata}.
+    {ok, Peer#libp2p_signed_peer_pb{metadata=Metadata}}.
 
 %% @doc Updates the metadata for a given peer with the given key/value
 %% pair. The `Key' is expected to be a string, while `Value' is
 %% expected to be a binary.
--spec metadata_put(peer(), string(), binary()) -> peer().
+-spec metadata_put(peer(), string(), binary()) -> {ok, peer()} | {error, term()}.
 metadata_put(Peer=#libp2p_signed_peer_pb{}, Key, Value) when is_list(Key), is_binary(Value) ->
     Metadata = lists:keystore(Key, 1, metadata(Peer), {Key, Value}),
     metadata_set(Peer, Metadata).
 
 %% @doc Gets the value for a stored `Key' in metadata. If not found,
 %% the `Default' is returned.
--spec metadata_get(peer(), Key::string(), Default::binary()) -> binary().
+-spec metadata_get(peer(), Key::string(), Default::any()) -> any().
 metadata_get(Peer=#libp2p_signed_peer_pb{}, Key, Default) ->
     case lists:keyfind(Key, 1, metadata(Peer)) of
         false -> Default;
@@ -194,7 +197,7 @@ is_blacklisted(Peer=#libp2p_signed_peer_pb{}, ListenAddr) ->
 %% validation is done against the existing listen addresses stored in
 %% the peer. Blacklisting an address that the peer is not listening to
 %% will have no effect anyway.
--spec blacklist_set(peer(), [string()]) -> peer().
+-spec blacklist_set(peer(), [string()]) -> {ok, peer()} | {error, term()}.
 blacklist_set(Peer=#libp2p_signed_peer_pb{}, BlackList) when is_list(BlackList) ->
     metadata_put(Peer, "blacklist", term_to_binary(BlackList)).
 
@@ -229,7 +232,7 @@ encode(Msg=#libp2p_signed_peer_pb{}) ->
 %% strips metadata from the peers as part of encoding.
 -spec encode_list([peer()]) -> binary().
 encode_list(List) ->
-    StrippedList = [metadata_set(P, []) || P <- List],
+    StrippedList = [begin {ok, Stripped} = metadata_set(P, []), Stripped end || P <- List],
     libp2p_peer_pb:encode_msg(#libp2p_peer_list_pb{peers=StrippedList}).
 
 %% @doc Decodes a given binary into a list of peers.
@@ -271,7 +274,9 @@ sign_peer(Peer0 = #libp2p_peer_pb{signed_metadata=MD}, SigFun) ->
     end.
 
 encode_map(Map) ->
-    Encode = fun(K, V, Acc) when is_binary(K), is_integer(V) ->
+    Encode = fun(_, _, {error, Error}) ->
+                     {error, Error};
+                 (K, V,  Acc) when is_binary(K), is_integer(V) ->
                      [{binary_to_list(K), #libp2p_metadata_value_pb{value = {int, V}}}|Acc];
                 (K, V, Acc) when is_binary(K), is_float(V) ->
                      [{binary_to_list(K), #libp2p_metadata_value_pb{value = {flt, V}}}|Acc];
@@ -279,15 +284,15 @@ encode_map(Map) ->
                      [{binary_to_list(K), #libp2p_metadata_value_pb{value = {bin, V}}}|Acc];
                 (K, V, Acc) when is_binary(K), (V == true orelse V == false) ->
                      [{binary_to_list(K), #libp2p_metadata_value_pb{value = {boolean, V}}}|Acc];
-                (K, V, Acc) when is_binary(K) ->
-                     lager:warning("invalid metadata value ~p for key ~p, expectedinteger, float or binary",
-                                   [V, K]),
-                     Acc;
-                (K, V, Acc) ->
-                     lager:warning("invalid metadata key ~p with value ~p, keys must be binaries", [K, V]),
-                     Acc
+                (K, V, _Acc) when is_binary(K) ->
+                     {error, {invalid_value, V}};
+                (K, _V, _Acc) ->
+                     {error, {invalid_key, K}}
              end,
-    lists:sort(maps:fold(Encode, [], Map)).
+    case maps:fold(Encode, [], Map) of
+        {error, Error} -> {error, Error};
+        List -> {ok, lists:sort(List)}
+    end.
 
 
 -ifdef(TEST).
@@ -315,6 +320,7 @@ coding_test() ->
     {ok, Peer1} = mk_peer(#{connected => [libp2p_crypto:pubkey_to_bin(PubKey2)]}),
     {ok, DecodedPeer} = libp2p_peer:decode(libp2p_peer:encode(Peer1)),
 
+    %% check if decoded is the same as original
     ?assert(libp2p_peer:pubkey_bin(Peer1) == libp2p_peer:pubkey_bin(DecodedPeer)),
     ?assert(libp2p_peer:timestamp(Peer1) ==  libp2p_peer:timestamp(DecodedPeer)),
     ?assert(libp2p_peer:listen_addrs(Peer1) == libp2p_peer:listen_addrs(DecodedPeer)),
@@ -322,12 +328,24 @@ coding_test() ->
     ?assert(libp2p_peer:connected_peers(Peer1) == libp2p_peer:connected_peers(DecodedPeer)),
     ?assert(libp2p_peer:metadata(Peer1) == libp2p_peer:metadata(DecodedPeer)),
     ?assert(libp2p_peer:network_id(Peer1) == libp2p_peer:network_id(DecodedPeer)),
+    ?assert(libp2p_peer:signed_metadata(Peer1) == libp2p_peer:signed_metadata(DecodedPeer)),
 
+    %% Check simple similarity and signature verify
     ?assert(libp2p_peer:is_similar(Peer1, DecodedPeer)),
     ?assert(libp2p_peer:verify(Peer1)),
 
+    %% ensure signing with a different sigfun invalidates the verify
     {ok, InvalidPeer} = mk_peer(#{}, libp2p_peer:pubkey_bin(Peer1), SigFun2),
     ?assert(not libp2p_peer:verify(InvalidPeer)),
+
+    %% ensure timestamp override workds
+    {ok, Peer2} = mk_peer(#{timestamp => 22}),
+    ?assertEqual(22, libp2p_peer:timestamp(Peer2)),
+
+
+    %% Try creating a peer with a sigfun that returns an error
+    ?assertMatch({error, _}, mk_peer(#{}, libp2p_crypto:pubkey_to_bin(PubKey2),
+                                     fun(_) -> {error, no_bueno} end)),
 
     ok.
 
@@ -347,7 +365,7 @@ blacklist_test() ->
 
     ?assertEqual(ListenAddrs, libp2p_peer:cleared_listen_addrs(Peer1)),
 
-    Peer2 = libp2p_peer:blacklist_add(Peer1, BlackListAddr),
+    {ok, Peer2} = libp2p_peer:blacklist_add(Peer1, BlackListAddr),
     ?assertEqual(lists:delete(BlackListAddr, ListenAddrs), libp2p_peer:cleared_listen_addrs(Peer2)),
 
     %% check blacklist membership
@@ -355,7 +373,12 @@ blacklist_test() ->
     %% check blacklist
     ?assertEqual([BlackListAddr], libp2p_peer:blacklist(Peer2)),
     %% blacklist is deduped
-    ?assertEqual([BlackListAddr], libp2p_peer:blacklist(libp2p_peer:blacklist_add(Peer2, BlackListAddr))),
+    {ok, Peer3} = libp2p_peer:blacklist_add(Peer2, BlackListAddr),
+    ?assertEqual([BlackListAddr], libp2p_peer:blacklist(Peer3)),
+
+    %% Ensure metadata like blacklist is stripped on list encode
+    {ok, [DecodedPeer]} = libp2p_peer:decode_list(libp2p_peer:encode_list([Peer2])),
+    ?assertEqual([], libp2p_peer:blacklist(DecodedPeer)),
 
     ok.
 
@@ -375,6 +398,26 @@ network_id_test() ->
     ?assert(not libp2p_peer:network_id_allowable(Peer2, <<"not hello">>)),
 
     ok.
+
+
+signed_metadata_test() ->
+    MD = #{ <<"int">> => 22,
+            <<"double">> => 42.2,
+            <<"bytes">> => <<"hello">>,
+            <<"boolean">> => true
+          },
+    {ok, Peer1} = mk_peer(#{signed_metadata => MD}),
+
+    ?assertEqual(MD, libp2p_peer:signed_metadata(Peer1)),
+
+    ?assertEqual(<<"hello">>, libp2p_peer:signed_metadata_get(Peer1, <<"bytes">>, false)),
+    ?assertEqual(false, libp2p_peer:signed_metadata_get(Peer1, <<"unknown">>, false)),
+
+    ?assertMatch({error, {invalid_key, _}}, mk_peer(#{signed_metadata => MD#{"foo" => 22}})),
+    ?assertMatch({error, {invalid_value, _}}, mk_peer(#{signed_metadata => MD#{<<"foo">> => foo}})),
+
+    ok.
+
 
 stale_test() ->
     {ok, Peer1} = mk_peer(#{}),
