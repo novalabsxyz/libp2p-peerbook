@@ -8,7 +8,7 @@
 -include("pb/libp2p_peer_pb.hrl").
 
 -type nat_type() :: libp2p_peer_pb:nat_type().
--type peer_map() :: #{ pubkey => libp2p_crypto:pubkey_bin(),
+-type peer_map() :: #{ pubkey_bin => libp2p_crypto:pubkey_bin(),
                        listen_addrs => [string()],
                        connected => [binary()],
                        nat_type => nat_type(),
@@ -38,9 +38,9 @@ from_map(Map, SigFun) ->
                     no_entry -> erlang:system_time(millisecond);
                     V -> V
                 end,
-    Peer = #libp2p_peer_pb{pubkey=maps:get(pubkey, Map),
+    Peer = #libp2p_peer_pb{pubkey=maps:get(pubkey_bin, Map),
                            listen_addrs=[multiaddr:new(L) || L <- maps:get(listen_addrs, Map)],
-                           connected = maps:get(connected, Map),
+                           connected = maps:get(connected, Map, []),
                            nat_type=maps:get(nat_type, Map),
                            network_id=maps:get(network_id, Map, <<>>),
                            timestamp=Timestamp,
@@ -177,10 +177,10 @@ is_stale(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=Timestamp}}, Stal
 %% will not be connected to until that address is removed from the
 %% blacklist.
 -spec blacklist(peer()) -> [string()].
-blacklist(#libp2p_signed_peer_pb{metadata=Metadata}) ->
-    case lists:keyfind("blacklist", 1, Metadata) of
+blacklist(Peer=#libp2p_signed_peer_pb{}) ->
+    case metadata_get(Peer, "blacklist", false) of
         false -> [];
-        {_, Bin} -> binary_to_term(Bin)
+        Bin -> binary_to_term(Bin)
     end.
 
 %% @doc Returns whether a given listen address is blacklisted. Note
@@ -271,18 +271,122 @@ sign_peer(Peer0 = #libp2p_peer_pb{signed_metadata=MD}, SigFun) ->
     end.
 
 encode_map(Map) ->
-    lists:sort(maps:fold(fun(K, V, Acc) when is_binary(K), is_integer(V) ->
-                                 [{binary_to_list(K), #libp2p_metadata_value_pb{value = {int, V}}}|Acc];
-                            (K, V, Acc) when is_binary(K), is_float(V) ->
-                                 [{binary_to_list(K), #libp2p_metadata_value_pb{value = {flt, V}}}|Acc];
-                            (K, V, Acc) when is_binary(K), is_binary(V) ->
-                                 [{binary_to_list(K), #libp2p_metadata_value_pb{value = {bin, V}}}|Acc];
-                            (K, V, Acc) when is_binary(K), (V == true orelse V == false) ->
-                                 [{binary_to_list(K), #libp2p_metadata_value_pb{value = {boolean, V}}}|Acc];
-                            (K, V, Acc) when is_binary(K) ->
-                                 lager:warning("invalid metadata value ~p for key ~p, must be integer, float or binary", [V, K]),
-                                 Acc;
-                            (K, V, Acc) ->
-                                 lager:warning("invalid metadata key ~p with value ~p, keys must be binaries", [K, V]),
-                                 Acc
-                         end, [], Map)).
+    Encode = fun(K, V, Acc) when is_binary(K), is_integer(V) ->
+                     [{binary_to_list(K), #libp2p_metadata_value_pb{value = {int, V}}}|Acc];
+                (K, V, Acc) when is_binary(K), is_float(V) ->
+                     [{binary_to_list(K), #libp2p_metadata_value_pb{value = {flt, V}}}|Acc];
+                (K, V, Acc) when is_binary(K), is_binary(V) ->
+                     [{binary_to_list(K), #libp2p_metadata_value_pb{value = {bin, V}}}|Acc];
+                (K, V, Acc) when is_binary(K), (V == true orelse V == false) ->
+                     [{binary_to_list(K), #libp2p_metadata_value_pb{value = {boolean, V}}}|Acc];
+                (K, V, Acc) when is_binary(K) ->
+                     lager:warning("invalid metadata value ~p for key ~p, expectedinteger, float or binary",
+                                   [V, K]),
+                     Acc;
+                (K, V, Acc) ->
+                     lager:warning("invalid metadata key ~p with value ~p, keys must be binaries", [K, V]),
+                     Acc
+             end,
+    lists:sort(maps:fold(Encode, [], Map)).
+
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+mk_peer(MapOveride) ->
+    #{public := PubKey, secret := PrivKey} = libp2p_crypto:generate_keys(ecc_compact),
+    SigFun = libp2p_crypto:mk_sig_fun(PrivKey),
+    mk_peer(MapOveride, libp2p_crypto:pubkey_to_bin(PubKey), SigFun).
+
+mk_peer(MapOverride, PubKeyBin, SigFun) ->
+    PeerMap = maps:merge(#{pubkey_bin => PubKeyBin,
+                           listen_addrs => ["/ip4/8.8.8.8/tcp/1234"],
+                           nat_type => static
+                          }, MapOverride),
+    libp2p_peer:from_map(PeerMap, SigFun).
+
+
+
+
+coding_test() ->
+    #{public := PubKey2, secret := PrivKey2} = libp2p_crypto:generate_keys(ecc_compact),
+    SigFun2 = libp2p_crypto:mk_sig_fun(PrivKey2),
+
+    {ok, Peer1} = mk_peer(#{connected => [libp2p_crypto:pubkey_to_bin(PubKey2)]}),
+    {ok, DecodedPeer} = libp2p_peer:decode(libp2p_peer:encode(Peer1)),
+
+    ?assert(libp2p_peer:pubkey_bin(Peer1) == libp2p_peer:pubkey_bin(DecodedPeer)),
+    ?assert(libp2p_peer:timestamp(Peer1) ==  libp2p_peer:timestamp(DecodedPeer)),
+    ?assert(libp2p_peer:listen_addrs(Peer1) == libp2p_peer:listen_addrs(DecodedPeer)),
+    ?assert(libp2p_peer:nat_type(Peer1) ==  libp2p_peer:nat_type(DecodedPeer)),
+    ?assert(libp2p_peer:connected_peers(Peer1) == libp2p_peer:connected_peers(DecodedPeer)),
+    ?assert(libp2p_peer:metadata(Peer1) == libp2p_peer:metadata(DecodedPeer)),
+    ?assert(libp2p_peer:network_id(Peer1) == libp2p_peer:network_id(DecodedPeer)),
+
+    ?assert(libp2p_peer:is_similar(Peer1, DecodedPeer)),
+    ?assert(libp2p_peer:verify(Peer1)),
+
+    {ok, InvalidPeer} = mk_peer(#{}, libp2p_peer:pubkey_bin(Peer1), SigFun2),
+    ?assert(not libp2p_peer:verify(InvalidPeer)),
+
+    ok.
+
+coding_list_test() ->
+    {ok, Peer1} = mk_peer(#{}),
+
+    {ok, PeerList = [Peer1, Peer1]} = libp2p_peer:decode_list(libp2p_peer:encode_list([Peer1, Peer1])),
+
+    ?assert(lists:all(fun libp2p_peer:verify/1, PeerList)),
+
+    ok.
+
+blacklist_test() ->
+    BlackListAddr = "/ip4/8.8.8.8/tcp/1234",
+    ListenAddrs = [BlackListAddr, "/ip4/9.9.9.9/tcp/1234"],
+    {ok, Peer1} = mk_peer(#{listen_addrs => ListenAddrs}),
+
+    ?assertEqual(ListenAddrs, libp2p_peer:cleared_listen_addrs(Peer1)),
+
+    Peer2 = libp2p_peer:blacklist_add(Peer1, BlackListAddr),
+    ?assertEqual(lists:delete(BlackListAddr, ListenAddrs), libp2p_peer:cleared_listen_addrs(Peer2)),
+
+    %% check blacklist membership
+    ?assert(libp2p_peer:is_blacklisted(Peer2, BlackListAddr)),
+    %% check blacklist
+    ?assertEqual([BlackListAddr], libp2p_peer:blacklist(Peer2)),
+    %% blacklist is deduped
+    ?assertEqual([BlackListAddr], libp2p_peer:blacklist(libp2p_peer:blacklist_add(Peer2, BlackListAddr))),
+
+    ok.
+
+network_id_test() ->
+    {ok, Peer1} = mk_peer(#{}),
+    {ok, Peer2} = mk_peer(#{network_id => <<"hello">>}),
+
+    ?assertEqual(undefined, libp2p_peer:network_id(Peer1)),
+    ?assertEqual(<<"hello">>, libp2p_peer:network_id(Peer2)),
+
+    %% undefined network id is always allowed
+    ?assert(libp2p_peer:network_id_allowable(Peer1, undefined)),
+    ?assert(libp2p_peer:network_id_allowable(Peer2, undefined)),
+    %% a network id is allowed if the peer has undefined or a matching network id
+    ?assert(libp2p_peer:network_id_allowable(Peer1, <<"hello">>)),
+    ?assert(libp2p_peer:network_id_allowable(Peer2, <<"hello">>)),
+    ?assert(not libp2p_peer:network_id_allowable(Peer2, <<"not hello">>)),
+
+    ok.
+
+stale_test() ->
+    {ok, Peer1} = mk_peer(#{}),
+
+    %% a peer is stale if it's older than x millis. 0 should really
+    %% always be stale, a ways from the peer's creation time isn't
+    ?assert(libp2p_peer:is_stale(Peer1, 0)),
+    ?assert(not libp2p_peer:is_stale(Peer1, 10000)),
+
+    {ok, Peer2} = mk_peer(#{}),
+    ?assert(libp2p_peer:supersedes(Peer2, Peer1)),
+
+    ok.
+
+-endif.
