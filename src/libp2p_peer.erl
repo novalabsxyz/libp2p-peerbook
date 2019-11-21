@@ -422,7 +422,7 @@ stale_test() ->
 
     %% a peer is stale if it's older than x millis. 0 should really
     %% always be stale, a ways from the peer's creation time isn't
-    ?assert(libp2p_peer:is_stale(Peer1, 0)),
+    ?assert(libp2p_peer:is_stale(Peer1, -10)),
     ?assert(not libp2p_peer:is_stale(Peer1, 10000)),
 
     {ok, Peer2} = mk_peer(#{}),
