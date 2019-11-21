@@ -3,3 +3,114 @@
 [![Build status](https://badge.buildkite.com/484cb26ebc1dd62f4003e4c20a70486b324074e7a1dee53b96.svg)](https://buildkite.com/helium/libp2p-peerbook)
 [![codecov](https://codecov.io/gh/helium/libp2p-peerbook/branch/master/graph/badge.svg)](https://codecov.io/gh/helium/libp2p-peerbook)
 [![Hex.pm](https://img.shields.io/hexpm/v/libp2p-peerbook)](https://hex.pm/packages/libp2p-peerbook)
+
+This is a library for storing libp2p peer information in a peer to
+peer (p2p) network. The peerbook plays a key role in a p2p network
+because it maintains a view over time of the peers that are available
+in the network.
+
+## Features/Options
+
+The following key features define what a peerbook does with the peer
+records it maintains:
+
+* The **self** record is the peer record defined by the public key
+  binary passed into the peerbook using the requires `pubkey_bin`
+  option when it is started.
+
+  The self peer record can not be updated through an API but is
+  updated on a regular schedule.  To be able to sign the peer record
+  the peerbook requires a signing function passed in with the
+  `sig_fun` option.
+
+  To affect the data that goes into the self record use the `set_` and
+  `register_` functions in the peerbook API.
+
+* Peer records in the peerbook are expired after a configurable
+  `stale_time` after which the record is no longer retrievable from
+  the peerbook
+
+* Local peer change notification. When the self record changes or any
+  new records are put in the store the peerbook will send a local
+  notification `{new_peers, PeerList}` with all the new or changed
+  peers. To limit the rate of notifications, the `notification_time`
+  option can be used.
+
+* Metadata can be associated with the self peer and is included in the
+  signed peer record. The `metadata_fun`option can be used to supply a
+  function that is called every time the self peer is updated by the
+  peerbook.
+
+* The peerbook will only accept peer records that have the same
+  `network_id` as the peerbook is configured with. This allows multiple
+  overlapping swarms to run without affecting each other by using
+  different network ids.
+
+  *Note:* The default network id allows peer records from any
+  host. Set the network id before actually using a peerbook in a
+  production network.
+
+## Using the library
+
+Add the library to your `rebar.config` deps section:
+
+```erlang
+{deps, [
+        libp2p_peerbook,
+        ...
+       ]}.
+```
+
+## Creating a peerbook instance
+
+Usually a peerbook is created as part of a libp2p swarm instance,
+which ends up using something similar to:
+
+```erlang
+Opts = #{
+    pubkey_bin => PubKeyBin,
+    sig_fun => SigFun,
+},
+{ok Pid} = libp2p_peerbook:start_link(Opts),
+Handle = libp2p_peerbook:peerbook_handle(Pid)
+
+```
+
+Since a peerbook is representing a host on a network that host is
+identified by a public key, and its binary form `PubKeyBin`. Since the
+peer entry for the host is signed the options also need to include a
+`SigFun` so that the peerbook can update the peer record for this
+host.
+
+The final step is to retrieve the `Handle` of the peerbook. Peerbook
+functions all go through a handle to allow concurrency optimizations.
+
+## Getting peers
+
+Fetch a peer record from the peerbook:
+
+```erlang
+    {ok, Peer} = libp2p_peerbook:get(Handle, PeerID)
+```
+
+where `PeerID` is the binary of the public key of a peer.
+
+The peerbook will return `{error, not_found}`if the record is not
+found in the store or has gone stale.
+
+## Putting peers
+
+Put one or more peer records in the store using:
+
+```erlang
+    libp2p_peerbook:put(Handle, [Peer])
+```
+
+Where `Peer` is a signed peer record. The peerbook will validate the
+peer against a number of criteria including verifying the signature,
+whether the peer is stale and supersedes an existing entry and that
+the network id is acceptable.
+
+Any peers passing validation will be stored and sent out on the next
+local notification. Invalid peers are ignored and no error is
+returned.
