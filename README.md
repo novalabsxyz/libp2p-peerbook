@@ -67,13 +67,14 @@ Usually a peerbook is created as part of a libp2p swarm instance,
 which ends up using something similar to:
 
 ```erlang
-Opts = #{
-    pubkey_bin => PubKeyBin,
-    sig_fun => SigFun,
-},
-{ok Pid} = libp2p_peerbook:start_link(Opts),
-Handle = libp2p_peerbook:peerbook_handle(Pid)
-
+    #{public := PubKey, secret := PrivKey} = libp2p_crypto:generate_keys(ecc_compact),
+    SigFun = libp2p_crypto:mk_sig_fun(PrivKey),
+    Opts = #{
+        pubkey_bin => PubKeyBin,
+        sig_fun => SigFun,
+    },
+    {ok Pid} = libp2p_peerbook:start_link(Opts),
+    Handle = libp2p_peerbook:peerbook_handle(Pid)
 ```
 
 Since a peerbook is representing a host on a network that host is
@@ -114,3 +115,24 @@ the network id is acceptable.
 Any peers passing validation will be stored and sent out on the next
 local notification. Invalid peers are ignored and no error is
 returned.
+
+## Notifications
+
+When the peerbook updates the self record or new peer entries are
+stored the peerbook will send out a notification to a `pg2` group to
+notify of the new or changed peers.
+
+To join the group:
+
+```erlang
+    libp2p_peerbook:join_notify(Handle, self())
+```
+
+After which the process `Pid` will receive messages with the following
+format:
+
+```erlang
+    {new_peers, PeerList}
+```
+
+Where `PeerList` is an array of peer records.
