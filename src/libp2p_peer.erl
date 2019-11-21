@@ -203,12 +203,12 @@ blacklist_set(Peer=#libp2p_signed_peer_pb{}, BlackList) when is_list(BlackList) 
 
 %% @doc Add a given listen address to the blacklist for the given
 %% peer.
+-spec blacklist_add(#libp2p_signed_peer_pb{}, ListenAddr::string()) -> {ok, peer()} | {error, term()}.
 blacklist_add(Peer=#libp2p_signed_peer_pb{}, ListenAddr) ->
     BlackList = blacklist(Peer),
     NewBlackList = case lists:member(ListenAddr, BlackList) of
                        true -> BlackList;
-                       false ->
-                           [ListenAddr | BlackList]
+                       false -> [ListenAddr | BlackList]
                    end,
     blacklist_set(Peer, NewBlackList).
 
@@ -309,8 +309,6 @@ mk_peer(MapOverride, PubKeyBin, SigFun) ->
                            nat_type => static
                           }, MapOverride),
     libp2p_peer:from_map(PeerMap, SigFun).
-
-
 
 
 coding_test() ->

@@ -2,6 +2,7 @@
 
 %% api
 -export([keys/1, values/1, put/2, get/2, is_key/2, remove/2,
+         peerbook_pid/1, peerbook_handle/1,
          stale_time/1, join_notify/2, set_nat_type/2,
          register_listen_addr/2, unregister_listen_addr/2, blacklist_listen_addr/3,
          register_session/3, unregister_session/2]).
@@ -22,7 +23,6 @@
 
 -record(state,
         { peerbook :: peerbook(),
-          tid :: ets:tab(),
           nat_type = unknown :: libp2p_peer:nat_type(),
           peer_time :: pos_integer(),
           peer_timer = make_ref() :: reference(),
@@ -39,6 +39,7 @@
           sig_fun :: fun((binary()) -> binary())
         }).
 
+%% Name used as a basename in ets table
 -define(SERVICE, peerbook).
 
 %% Default peer stale time is 24 hours (in milliseconds)
@@ -61,7 +62,7 @@
 %%
 
 -spec put(peerbook(), [libp2p_peer:peer()]) -> ok | {error, term()}.
-put(#peerbook{stale_time=StaleTime, pubkey_bin=ThisPeerId, network_id=NetworkID}=Handle, PeerList) ->
+put(Handle=#peerbook{pubkey_bin=ThisPeerId}, PeerList) ->
     NewPeers = lists:filter(fun(NewPeer) ->
                                     NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
                                     case unsafe_fetch_peer(NewPeerId, Handle) of
@@ -71,9 +72,8 @@ put(#peerbook{stale_time=StaleTime, pubkey_bin=ThisPeerId, network_id=NetworkID}
                                             NewPeerId /= ThisPeerId
                                                 andalso libp2p_peer:verify(NewPeer)
                                                 andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
-                                                andalso not libp2p_peer:is_stale(NewPeer, StaleTime)
                                                 andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
-                                                andalso libp2p_peer:network_id_allowable(NewPeer, NetworkID)
+                                                andalso peer_allowable(Handle, NewPeer)
                                     end
                             end, PeerList),
 
@@ -83,20 +83,19 @@ put(#peerbook{stale_time=StaleTime, pubkey_bin=ThisPeerId, network_id=NetworkID}
     gen_server:cast(peerbook_pid(Handle), {notify_new_peers, NewPeers}),
     ok.
 
+
 -spec get(peerbook(), libp2p_crypto:pubkey_bin()) -> {ok, libp2p_peer:peer()} | {error, term()}.
 get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
-    case fetch_peer(ID, Handle) of
+    case unsafe_fetch_peer(ID, Handle) of
         {error, not_found} when ID == ThisPeerId ->
             gen_server:call(peerbook_pid(Handle), update_this_peer, infinity),
             get(Handle, ID);
         {error, Error} ->
             {error, Error};
         {ok, Peer} ->
-            case libp2p_peer:network_id_allowable(Peer, Handle#peerbook.network_id) of
-               false ->
-                    {error, not_found};
-                true ->
-                    {ok, Peer}
+            case peer_allowable(Handle, Peer) of
+                true -> {ok, Peer};
+               false -> {error, not_found}
             end
     end.
 
@@ -133,7 +132,7 @@ blacklist_listen_addr(Handle=#peerbook{}, ID, ListenAddr) ->
         {error, Error} ->
             {error, Error};
         {ok, Peer} ->
-            UpdatedPeer = libp2p_peer:blacklist_add(Peer, ListenAddr),
+            {ok, UpdatedPeer} = libp2p_peer:blacklist_add(Peer, ListenAddr),
             store_peer(UpdatedPeer, Handle)
     end.
 
@@ -142,8 +141,8 @@ join_notify(Handle=#peerbook{}, Joiner) ->
     gen_server:cast(peerbook_pid(Handle), {join_notify, Joiner}).
 
 -spec register_session(peerbook(), libp2p_crypto:pubkey_bin(), pid()) -> ok.
-register_session(Handle=#peerbook{}, SessionAddr, SessionPid) ->
-    gen_server:cast(peerbook_pid(Handle), {register_session, {SessionAddr, SessionPid}}).
+register_session(Handle=#peerbook{}, SessionPubKeyBin, SessionPid) ->
+    gen_server:cast(peerbook_pid(Handle), {register_session, {SessionPubKeyBin, SessionPid}}).
 
 -spec unregister_session(peerbook(), pid()) -> ok.
 unregister_session(Handle=#peerbook{}, SessionPid) ->
@@ -161,32 +160,37 @@ unregister_listen_addr(Handle=#peerbook{}, ListenAddr) ->
 set_nat_type(Handle=#peerbook{}, NatType) ->%
     gen_server:cast(peerbook_pid(Handle), {set_nat_type, NatType}).
 
--spec peerbook_pid(#peerbook{}) -> pid().
+-spec peerbook_pid(peerbook()) -> pid().
 peerbook_pid(#peerbook{tid = TID}) ->
     ets:lookup_element(TID, {?SERVICE, pid}, 2).
+
+-spec peerbook_handle(pid()) -> {ok, peerbook()} | {error, term()}.
+peerbook_handle(Pid) ->
+    gen_server:call(Pid, peerbook).
+
 %%
 %% gen_server
 %%
 
-start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin, network_id := _NetworkID}) ->
-    TID = case maps:get(tid, Opts, false) of
-              false ->
-                  ets:new(?MODULE, [public, ordered_set, {read_concurrency, true}]);
-              Table -> Table
-          end,
+start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin}) ->
     MetaDataFun = maps:get(metadata_fun, Opts, fun() -> #{} end),
     EligibleFun = maps:get(peer_gossip_eligible_fun, Opts, fun(_Peer) -> true end),
-    gen_server:start_link(?MODULE, Opts#{tid => TID,
-                                         metadata_fun => MetaDataFun,
+    NetworkID = maps:get(netowrk_id, Opts, <<>>),
+    gen_server:start_link(?MODULE, Opts#{metadata_fun => MetaDataFun,
+                                         network_id => NetworkID,
                                          peer_gossip_eligible_fun => EligibleFun}, []).
 
 init(Opts = #{ sig_fun := SigFun,
-               tid := TID,
                metadata_fun := MetaDataFun,
                peer_gossip_eligible_fun := EligibleFun,
                network_id := NetworkID,
                pubkey_bin := PubKeyBin }) ->
     erlang:process_flag(trap_exit, true),
+    TID = case maps:get(tid, Opts, false) of
+              false ->
+                  ets:new(?MODULE, [ordered_set, {read_concurrency, true}]);
+              Table -> Table
+          end,
     ets:insert(TID, {{?SERVICE, pid}, self()}),
     %% Ensure data folder is available
     DataDir = filename:join([maps:get(data_dir, Opts, "data"), ?SERVICE]),
@@ -203,8 +207,7 @@ init(Opts = #{ sig_fun := SigFun,
 
     StaleTime = maps:get(stale_time, Opts, ?DEFAULT_STALE_TIME),
     MkState = fun(Handle) ->
-                      #state{tid=TID,
-                             peerbook=Handle,
+                      #state{peerbook=Handle,
                              notify_group = GroupName,
                              metadata_fun = MetaDataFun,
                              sig_fun = SigFun,
@@ -241,23 +244,29 @@ init(Opts = #{ sig_fun := SigFun,
 
 handle_call(update_this_peer, _From, State) ->
     {reply, update_this_peer(State), State};
+handle_call(peerbook, _From, State) ->
+    {reply, {ok, State#state.peerbook}, State};
 handle_call(Msg, _From, State) ->
     lager:warning("Unhandled call: ~p", [Msg]),
     {reply, ok, State}.
 
 handle_cast({notify_new_peers, Peers}, State) ->
     {noreply, notify_new_peers(Peers, State)};
-handle_cast(changed_listener, State=#state{}) ->
-    {noreply, update_this_peer(State)};
 handle_cast({set_nat_type, UpdatedNatType}, State=#state{}) ->
     {noreply, update_this_peer(State#state{nat_type=UpdatedNatType})};
 handle_cast({unregister_session, SessionPid}, State=#state{sessions=Sessions}) ->
     NewSessions = lists:filter(fun({_Addr, Pid}) -> Pid /= SessionPid end, Sessions),
     {noreply, update_this_peer(State#state{sessions=NewSessions})};
-handle_cast({register_session, {SessionAddr, SessionPid}},
+handle_cast({register_session, {SessionPubKeyBin, SessionPid}},
             State=#state{sessions=Sessions}) ->
-    NewSessions = [{SessionAddr, SessionPid} | Sessions],
+    NewSessions = [{SessionPubKeyBin, SessionPid} | Sessions],
     {noreply, update_this_peer(State#state{sessions=NewSessions})};
+handle_cast({unregister_listen_addr, ListenAddr}, State=#state{}) ->
+    ListenAddrs = lists:filter(fun(Addr) -> Addr /= ListenAddr end, State#state.listen_addrs),
+    {noreply, update_this_peer(State#state{listen_addrs=ListenAddrs})};
+handle_cast({register_listen_addr, ListenAddr}, State=#state{}) ->
+    ListenAddrs = [ListenAddr | State#state.listen_addrs],
+    {noreply, update_this_peer(State#state{listen_addrs=ListenAddrs})};
 handle_cast({join_notify, JoinPid}, State=#state{notify_group=Group}) ->
     %% only allow a pid to join once
     case lists:member(JoinPid, pg2:get_members(Group)) of
@@ -275,7 +284,7 @@ handle_info(peer_timeout, State=#state{}) ->
     {noreply, update_this_peer(mk_this_peer(State), State)};
 handle_info(notify_timeout, State=#state{}) ->
     {noreply, notify_peers(State#state{notify_timer=undefined})};
-handle_info(gossip_peers_timeout, State=#state{gossip_peer_eligible_fun=EligibleFun}) ->
+handle_info(gossip_peers_timeout, State=#state{peerbook=Handle, gossip_peer_eligible_fun=EligibleFun}) ->
     %% TODO longer term use peer updates to update the elegible peers
     %% list and avoid folding the peerbook at all
     EligiblePeerKeys = fold_peers(fun(_, Peer, Acc) ->
@@ -284,7 +293,7 @@ handle_info(gossip_peers_timeout, State=#state{gossip_peer_eligible_fun=Eligible
                                               false -> Acc
                                        end
                                end, [], State#state.peerbook),
-    ets:insert(State#state.tid, {{?SERVICE, eligible_gossip_peers}, EligiblePeerKeys}),
+    ets:insert(Handle#peerbook.tid, {{?SERVICE, eligible_gossip_peers}, EligiblePeerKeys}),
     NewTimer = erlang:send_after(State#state.gossip_peers_timeout, self(), gossip_peers_timeout),
     {noreply, State#state{gossip_peers_timer=NewTimer}};
 
@@ -304,6 +313,13 @@ terminate(_Reason, State) ->
 %% Internal
 %%
 
+
+-spec peer_allowable(peerbook(), libp2p_peer:peer()) -> boolean().
+peer_allowable(Handle=#peerbook{}, Peer) ->
+    not libp2p_peer:is_stale(Peer, Handle#peerbook.stale_time) andalso
+        libp2p_peer:network_id_allowable(Peer, Handle#peerbook.network_id).
+
+
 -spec mk_this_peer(#state{}) -> {ok, libp2p_peer:peer()} | {error, term()}.
 mk_this_peer(State=#state{}) ->
     ConnectedAddrs = sets:to_list(sets:from_list([Addr || {Addr, _} <- State#state.sessions])),
@@ -314,7 +330,7 @@ mk_this_peer(State=#state{}) ->
                catch
                    _:_ -> #{}
                end,
-    libp2p_peer:from_map(#{ pubkey => State#state.peerbook#peerbook.pubkey_bin,
+    libp2p_peer:from_map(#{ pubkey_bin => State#state.peerbook#peerbook.pubkey_bin,
                             listen_addrs => State#state.listen_addrs,
                             connected => ConnectedAddrs,
                             nat_type => State#state.nat_type,
@@ -342,15 +358,16 @@ update_this_peer(State=#state{}) ->
     end.
 
 -spec update_this_peer({ok, libp2p_peer:peer()} | {error, term()}, #state{}) -> #state{}.
-update_this_peer({error, _Error}, State=#state{peer_timer=PeerTimer}) ->
+update_this_peer(Result, State=#state{peer_timer=PeerTimer}) ->
     erlang:cancel_timer(PeerTimer),
     NewPeerTimer = erlang:send_after(State#state.peer_time, self(), peer_timeout),
-    State#state{peer_timer=NewPeerTimer};
-update_this_peer({ok, NewPeer}, State=#state{peer_timer=PeerTimer}) ->
-    store_peer(NewPeer, State#state.peerbook),
-    erlang:cancel_timer(PeerTimer),
-    NewPeerTimer = erlang:send_after(State#state.peer_time, self(), peer_timeout),
-    notify_new_peers([NewPeer], State#state{peer_timer=NewPeerTimer}).
+    NewState = State#state{peer_timer=NewPeerTimer},
+    case Result of
+        {error, _Error} -> NewState;
+        {ok, NewPeer} ->
+            store_peer(NewPeer, State#state.peerbook),
+            notify_new_peers([NewPeer], NewState)
+    end.
 
 -spec notify_new_peers([libp2p_peer:peer()], #state{}) -> #state{}.
 notify_new_peers([], State=#state{}) ->
@@ -408,28 +425,15 @@ unsafe_fetch_peer(ID, #peerbook{store=Store}) ->
         not_found -> {error, not_found}
     end.
 
--spec fetch_peer(libp2p_crypto:pubkey_bin(), peerbook())
-                -> {ok, libp2p_peer:peer()} | {error, term()}.
-fetch_peer(ID, Handle=#peerbook{stale_time=StaleTime}) ->
-    case unsafe_fetch_peer(ID, Handle) of
-        {ok, Peer} ->
-            case libp2p_peer:is_stale(Peer, StaleTime) of
-                true -> {error, not_found};
-                false -> {ok, Peer}
-            end;
-        {error, Error} -> {error,Error}
-    end.
 
-
-fold_peers(Fun, Acc0, #peerbook{network_id=NetworkID, store=Store, stale_time=StaleTime}) ->
-    {ok, Iterator} = rocksdb:iterator(Store, []),
+fold_peers(Fun, Acc0, Handle=#peerbook{}) ->
+    {ok, Iterator} = rocksdb:iterator(Handle#peerbook.store, []),
     fold(Iterator, rocksdb:iterator_move(Iterator, first),
          fun(Key, Bin, Acc) ->
                  {ok, Peer} = libp2p_peer:decode(Bin),
-                 case libp2p_peer:is_stale(Peer, StaleTime)
-                     orelse not libp2p_peer:network_id_allowable(Peer, NetworkID) of
-                     true -> Acc;
-                     false -> Fun(Key, Peer, Acc)
+                 case peer_allowable(Handle, Peer) of
+                     false -> Acc;
+                     true -> Fun(Key, Peer, Acc)
                  end
          end, Acc0).
 
