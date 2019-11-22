@@ -39,7 +39,7 @@ init_per_testcase(heartbeat_test, Config) ->
                      notify_time => 20}, Config);
 init_per_testcase(notify_test, Config) ->
     %% only send out notifications quickly
-    start_peerbook(#{notify_time => 20}, Config);
+    start_peerbook(#{notify_time => 50}, Config);
 init_per_testcase(stale_test, Config) ->
     %% Set stale time to something short
     StaleTime = 50,
@@ -184,8 +184,8 @@ heartbeat_test(Config) ->
     libp2p_peerbook:join_notify(Handle, self()),
 
     receive
-        {new_peers, [Peer]} ->
-            ?assertEqual(PubKeyBin, libp2p_peer:pubkey_bin(Peer))
+        {changed_peers, {{add, Add}, {remove, _}}} ->
+            ?assert(maps:is_key(PubKeyBin, Add))
     after 1000 ->
             ct:fail(timeout_heartbeat)
     end,
@@ -196,13 +196,27 @@ notify_test(Config) ->
     Handle = ?config(peerbook, Config),
     PubKeyBin = ?config(pubkey_bin, Config),
 
+    %% Add two peers
+    {ok, Peer1} = mk_peer(#{}),
+    {ok, Peer2} = mk_peer(#{}),
+    libp2p_peerbook:put(Handle, [Peer1, Peer2]),
+
     libp2p_peerbook:join_notify(Handle, self()),
-    %% cause a change in the peer
+
+    %% cause a change in the self peer
     libp2p_peerbook:set_nat_type(Handle, static),
 
+    %% And remove one of the two peers
+    Peer2PubKeyBin = libp2p_peer:pubkey_bin(Peer2),
+    libp2p_peerbook:remove(Handle, Peer2PubKeyBin),
+
     receive
-        {new_peers, [Peer]} ->
-            ?assertEqual(PubKeyBin, libp2p_peer:pubkey_bin(Peer))
+        {changed_peers, {{add, Add}, {remove, Remove}}} ->
+            %% We should see the self peer and peer1 added and peer 2
+            %% removed
+            ?assert(sets:is_element(Peer2PubKeyBin, Remove)),
+            ?assert(maps:is_key(PubKeyBin, Add)),
+            ?assert(maps:is_key(libp2p_peer:pubkey_bin(Peer1), Add))
     after 1000 ->
             ct:fail(timeout_notify)
     end,

@@ -19,6 +19,9 @@
                   }).
 -type peerbook() :: #peerbook{}.
 
+-type change_descriptor() :: change_add_descriptor() | change_remove_descriptor().
+-type change_add_descriptor() :: {add, #{libp2p_crypto:pubkey_bin() => libp2p_peer:peer()}}.
+-type change_remove_descriptor() :: {remove, sets:set(libp2p_crypto:pubkey_bin())}.
 -export_type([peerbook/0]).
 
 -record(state,
@@ -26,13 +29,11 @@
           nat_type = unknown :: libp2p_peer:nat_type(),
           peer_time :: pos_integer(),
           peer_timer = make_ref() :: reference(),
-          gossip_peers_timer = make_ref() :: reference(),
-          gossip_peers_timeout :: pos_integer(),
-          gossip_peer_eligible_fun :: fun((libp2p_peer:peer()) -> boolean()),
           notify_group :: any(),
           notify_time :: pos_integer(),
           notify_timer=undefined :: reference() | undefined,
-          notify_peers=#{} :: #{libp2p_crypto:pubkey_bin() => libp2p_peer:peer()},
+          notify_peers={{add, #{}},
+                        {remove, sets:new()}} :: {change_add_descriptor(), change_remove_descriptor()},
           sessions=[] :: [{libp2p_crypto:pubkey_bin(), pid()}],
           listen_addrs=[] :: [string()],
           metadata_fun :: fun(() -> #{binary() => binary}),
@@ -50,12 +51,7 @@
 %% allows for fast arrivels to coalesce a number of new peers before a
 %% new list is sent out.
 -define(DEFAULT_NOTIFY_TIME, 5 * 1000).
-%% number of recently updated peerbook entries we should regossip to our
-%% gossip peers
--define(DEFAULT_NOTIFY_PEER_GOSSIP_LIMIT, 5).
-%% Default timeout for selecting eligible gossip peers. Set to 30
-%% minutes (in milliseconds)
--define(DEFAULT_GOSSIP_PEERS_TIMEOUT, 30 * 60 * 1000).
+
 
 %%
 %% API
@@ -63,24 +59,27 @@
 
 -spec put(peerbook(), [libp2p_peer:peer()]) -> ok | {error, term()}.
 put(Handle=#peerbook{pubkey_bin=ThisPeerId}, PeerList) ->
-    NewPeers = lists:filter(fun(NewPeer) ->
-                                    NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
-                                    case unsafe_fetch_peer(NewPeerId, Handle) of
-                                        {error, not_found} -> true;
-                                        {ok, ExistingPeer} ->
-                                            %% Only store peers that meet some key criteria
-                                            NewPeerId /= ThisPeerId
-                                                andalso libp2p_peer:verify(NewPeer)
-                                                andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
-                                                andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
-                                                andalso peer_allowable(Handle, NewPeer)
-                                    end
-                            end, PeerList),
-
+    NewPeers = lists:filtermap(fun(NewPeer) ->
+                                       NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
+                                       case unsafe_fetch_peer(NewPeerId, Handle) of
+                                           {error, not_found} -> {true, {NewPeerId, NewPeer}};
+                                           {ok, ExistingPeer} ->
+                                               case
+                                                   %% Only store peers that meet some key criteria
+                                                   NewPeerId /= ThisPeerId
+                                                   andalso libp2p_peer:verify(NewPeer)
+                                                   andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
+                                                   andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
+                                                   andalso peer_allowable(Handle, NewPeer) of
+                                                   true -> {true, {NewPeerId, NewPeer}};
+                                                   false -> false
+                                               end
+                                       end
+                               end, PeerList),
     % Add new peers to the store
-    lists:foreach(fun(P) -> store_peer(P, Handle) end, NewPeers),
+    lists:foreach(fun({PeerID, Peer}) -> store_peer(PeerID, Peer, Handle) end, NewPeers),
     % Notify group of new peers
-    gen_server:cast(peerbook_pid(Handle), {notify_new_peers, NewPeers}),
+    gen_server:cast(peerbook_pid(Handle), {handle_changed_peers, {add, maps:from_list(NewPeers)}}),
     ok.
 
 
@@ -114,11 +113,18 @@ keys(Handle=#peerbook{}) ->
 values(Handle=#peerbook{}) ->
     fetch_peers(Handle).
 
--spec remove(peerbook(), libp2p_crypto:pubkey_bin()) -> ok | {error, no_delete}.
+-spec remove(peerbook(), libp2p_crypto:pubkey_bin()) -> ok | {error, term()}.
 remove(Handle=#peerbook{pubkey_bin=ThisPeerId}, ID) ->
      case ID == ThisPeerId of
          true -> {error, no_delete};
-         false -> delete_peer(ID, Handle)
+         false ->
+             case delete_peer(ID, Handle) of
+                 ok ->
+                     gen_server:cast(peerbook_pid(Handle), {handle_changed_peers,
+                                                            {remove, sets:from_list([ID])}});
+                 {error, Error} ->
+                     {error, Error}
+             end
      end.
 
 -spec stale_time(peerbook()) -> pos_integer().
@@ -133,7 +139,7 @@ blacklist_listen_addr(Handle=#peerbook{}, ID, ListenAddr) ->
             {error, Error};
         {ok, Peer} ->
             {ok, UpdatedPeer} = libp2p_peer:blacklist_add(Peer, ListenAddr),
-            store_peer(UpdatedPeer, Handle)
+            store_peer(ID, UpdatedPeer, Handle)
     end.
 
 -spec join_notify(peerbook(), pid()) -> ok.
@@ -174,15 +180,14 @@ peerbook_handle(Pid) ->
 
 start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin}) ->
     MetaDataFun = maps:get(metadata_fun, Opts, fun() -> #{} end),
-    EligibleFun = maps:get(peer_gossip_eligible_fun, Opts, fun(_Peer) -> true end),
     NetworkID = maps:get(netowrk_id, Opts, <<>>),
-    gen_server:start_link(?MODULE, Opts#{metadata_fun => MetaDataFun,
-                                         network_id => NetworkID,
-                                         peer_gossip_eligible_fun => EligibleFun}, []).
+    gen_server:start_link(?MODULE,
+                          Opts#{metadata_fun => MetaDataFun,
+                                network_id => NetworkID
+                               }, []).
 
 init(Opts = #{ sig_fun := SigFun,
                metadata_fun := MetaDataFun,
-               peer_gossip_eligible_fun := EligibleFun,
                network_id := NetworkID,
                pubkey_bin := PubKeyBin }) ->
     erlang:process_flag(trap_exit, true),
@@ -200,10 +205,8 @@ init(Opts = #{ sig_fun := SigFun,
     GroupName = pg2:create([?SERVICE, make_ref()]),
     ok = pg2:create(GroupName),
 
-    %% initialize elligible gossip peer cache
-    ets:insert(TID, {{?SERVICE, eligible_gossip_peers}, []}),
-    %% Fire of the associated timeout to refresh the eligible gossip cache
-    self() ! gossip_peers_timeout,
+    %% Fire of the associated timeout to start the notify cycle
+    self() ! notify_timeout,
 
     StaleTime = maps:get(stale_time, Opts, ?DEFAULT_STALE_TIME),
     MkState = fun(Handle) ->
@@ -212,10 +215,7 @@ init(Opts = #{ sig_fun := SigFun,
                              metadata_fun = MetaDataFun,
                              sig_fun = SigFun,
                              peer_time = maps:get(peer_time, Opts, ?DEFAULT_PEER_TIME),
-                             notify_time = maps:get(notify_time, Opts, ?DEFAULT_NOTIFY_TIME),
-                             gossip_peer_eligible_fun = EligibleFun,
-                             gossip_peers_timeout = maps:get(gossip_peers_timeout, Opts,
-                                                             ?DEFAULT_GOSSIP_PEERS_TIMEOUT)}
+                             notify_time = maps:get(notify_time, Opts, ?DEFAULT_NOTIFY_TIME)}
               end,
 
     case ets:lookup(TID, {?SERVICE, handle}) of
@@ -250,8 +250,8 @@ handle_call(Msg, _From, State) ->
     lager:warning("Unhandled call: ~p", [Msg]),
     {reply, ok, State}.
 
-handle_cast({notify_new_peers, Peers}, State) ->
-    {noreply, notify_new_peers(Peers, State)};
+handle_cast({handle_changed_peers, Change}, State) ->
+    {noreply, handle_changed_peers(Change, State)};
 handle_cast({set_nat_type, UpdatedNatType}, State=#state{}) ->
     {noreply, update_this_peer(State#state{nat_type=UpdatedNatType})};
 handle_cast({unregister_session, SessionPid}, State=#state{sessions=Sessions}) ->
@@ -284,18 +284,6 @@ handle_info(peer_timeout, State=#state{}) ->
     {noreply, update_this_peer(mk_this_peer(State), State)};
 handle_info(notify_timeout, State=#state{}) ->
     {noreply, notify_peers(State#state{notify_timer=undefined})};
-handle_info(gossip_peers_timeout, State=#state{peerbook=Handle, gossip_peer_eligible_fun=EligibleFun}) ->
-    %% TODO longer term use peer updates to update the elegible peers
-    %% list and avoid folding the peerbook at all
-    EligiblePeerKeys = fold_peers(fun(_, Peer, Acc) ->
-                                          case EligibleFun(Peer) of
-                                              true -> [libp2p_peer:pubkey_bin(Peer) | Acc];
-                                              false -> Acc
-                                       end
-                               end, [], State#state.peerbook),
-    ets:insert(Handle#peerbook.tid, {{?SERVICE, eligible_gossip_peers}, EligiblePeerKeys}),
-    NewTimer = erlang:send_after(State#state.gossip_peers_timeout, self(), gossip_peers_timeout),
-    {noreply, State#state{gossip_peers_timer=NewTimer}};
 
 handle_info(Msg, State) ->
     lager:warning("Unhandled info: ~p", [Msg]),
@@ -365,47 +353,30 @@ update_this_peer(Result, State=#state{peer_timer=PeerTimer}) ->
     case Result of
         {error, _Error} -> NewState;
         {ok, NewPeer} ->
-            store_peer(NewPeer, State#state.peerbook),
-            notify_new_peers([NewPeer], NewState)
+            store_peer(libp2p_peer:pubkey_bin(NewPeer), NewPeer, State#state.peerbook),
+            handle_changed_peers({add, #{libp2p_peer:pubkey_bin(NewPeer) => NewPeer}}, NewState)
     end.
 
--spec notify_new_peers([libp2p_peer:peer()], #state{}) -> #state{}.
-notify_new_peers([], State=#state{}) ->
-    State;
-notify_new_peers(NewPeers, State=#state{notify_timer=NotifyTimer, notify_time=NotifyTime,
-                                        notify_peers=NotifyPeers}) ->
-    %% Cache the new peers to be sent out but make sure that the new
-    %% peers are not stale.  We do that by only replacing already
-    %% cached versions if the new peers supersede existing ones
-    NewNotifyPeers = lists:foldl(
-                       fun (Peer, Acc) ->
-                               case maps:find(libp2p_peer:pubkey_bin(Peer), Acc) of
-                                   error -> maps:put(libp2p_peer:pubkey_bin(Peer), Peer, Acc);
-                                   {ok, FoundPeer} ->
-                                       case libp2p_peer:supersedes(Peer, FoundPeer) of
-                                           true -> maps:put(libp2p_peer:pubkey_bin(Peer), Peer, Acc);
-                                           false -> Acc
-                                       end
-                               end
-                       end, NotifyPeers, NewPeers),
-    %% Set up a timer if ntot already set. This ensures that fast new
-    %% peers will keep notifications ticking at the notify_time, but
-    %% that no timer is firing if there's nothing to notify.
-    NewNotifyTimer = case NotifyTimer of
-                         undefined when map_size(NewNotifyPeers) > 0 ->
-                             erlang:send_after(NotifyTime, self(), notify_timeout);
-                         Other -> Other
-                     end,
-    State#state{notify_peers=NewNotifyPeers, notify_timer=NewNotifyTimer}.
+-spec handle_changed_peers(change_descriptor(), #state{}) -> #state{}.
+handle_changed_peers({add, ChangeAdd}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
+    %% Handle new entries and remove any "removed" entries
+    NewAdd = maps:merge(Add, ChangeAdd),
+    NewRemove = sets:subtract(Remove, sets:from_list(maps:keys(ChangeAdd))),
+    State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}};
+handle_changed_peers({remove, ChangeRemove}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
+    NewAdd = maps:without(sets:to_list(ChangeRemove), Add),
+    NewRemove = sets:union(ChangeRemove, Remove),
+    State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}}.
 
 -spec notify_peers(#state{}) -> #state{}.
-notify_peers(State=#state{notify_peers=NotifyPeers}) when map_size(NotifyPeers) == 0 ->
-    State;
-notify_peers(State=#state{notify_peers=NotifyPeers, notify_group=NotifyGroup}) ->
-    %% Notify to local interested parties
-    PeerList = maps:values(NotifyPeers),
-    [Pid ! {new_peers, PeerList} || Pid <- pg2:get_members(NotifyGroup)],
-    State#state{notify_peers=#{}}.
+notify_peers(State=#state{notify_peers=Notify={{add, Add}, {remove, Remove}}, notify_group=NotifyGroup}) ->
+    case maps:size(Add) > 0 orelse sets:size(Remove) > 0 of
+        true ->
+            [Pid ! {changed_peers, Notify} || Pid <- pg2:get_members(NotifyGroup)];
+        false -> ok
+    end,
+    erlang:send_after(State#state.notify_time, self(), notify_timeout),
+    State#state{notify_peers={{add, #{}}, {remove, sets:new()}}}.
 
 
 %% rocksdb has a bad spec that doesn't list corruption as a valid return
@@ -451,13 +422,13 @@ fetch_keys(State=#peerbook{}) ->
 fetch_peers(State=#peerbook{}) ->
     fold_peers(fun(_, Peer, Acc) -> [Peer | Acc] end, [], State).
 
--spec store_peer(libp2p_peer:peer(), peerbook()) -> ok | {error, term()}.
-store_peer(Peer, #peerbook{store=Store}) ->
-    case rocksdb:put(Store, libp2p_peer:pubkey_bin(Peer), libp2p_peer:encode(Peer), []) of
+-spec store_peer(libp2p_crypto:pubkey_bin(), libp2p_peer:peer(), peerbook()) -> ok | {error, term()}.
+store_peer(Key, Peer, #peerbook{store=Store}) ->
+    case rocksdb:put(Store, Key, libp2p_peer:encode(Peer), []) of
         {error, Error} -> {error, Error};
         ok -> ok
     end.
 
--spec delete_peer(libp2p_crypto:pubkey_bin(), peerbook()) -> ok.
+-spec delete_peer(libp2p_crypto:pubkey_bin(), peerbook()) -> ok | {error, term()}.
 delete_peer(ID, #peerbook{store=Store}) ->
     rocksdb:delete(Store, ID, []).
