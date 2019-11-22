@@ -1,4 +1,4 @@
--module(libp2p_peerbook_SUITE).
+-module(peerbook_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -133,7 +133,7 @@ get_put_test(Config) ->
 
     %% Add a peer beyond the self peer
     {ok, NewPeer} = mk_peer(#{}),
-    libp2p_peerbook:put(Handle, [NewPeer]),
+    ok = libp2p_peerbook:put(Handle, NewPeer),
 
     %% Check is_key for self adnd new peer
     ?assert(libp2p_peerbook:is_key(Handle, PubKeyBin)),
@@ -161,7 +161,7 @@ blacklist_test(Config) ->
     ListenAddrs = [BlackListAddr, "/ip4/8.8.8.8/tcp/1234"],
     %% Add a peer beyond the self peer
     {ok, NewPeer} = mk_peer(#{listen_addrs => ListenAddrs}),
-    libp2p_peerbook:put(Handle, [NewPeer]),
+    ok = libp2p_peerbook:put(Handle, NewPeer),
 
     %% black list an address
     libp2p_peerbook:blacklist_listen_addr(Handle, libp2p_peer:pubkey_bin(NewPeer), BlackListAddr),
@@ -199,7 +199,8 @@ notify_test(Config) ->
     %% Add two peers
     {ok, Peer1} = mk_peer(#{}),
     {ok, Peer2} = mk_peer(#{}),
-    libp2p_peerbook:put(Handle, [Peer1, Peer2]),
+    ok = libp2p_peerbook:put(Handle, Peer1),
+    ok = libp2p_peerbook:put(Handle, Peer2),
 
     libp2p_peerbook:join_notify(Handle, self()),
 
@@ -232,7 +233,7 @@ stale_test(Config) ->
 
     %% Add a peer
     {ok, NewPeer} = mk_peer(#{}),
-    libp2p_peerbook:put(Handle, [NewPeer]),
+    ok = libp2p_peerbook:put(Handle, NewPeer),
     ?assert(libp2p_peerbook:is_key(Handle, libp2p_peer:pubkey_bin(NewPeer))),
 
     %% Wait for it to get stale and no longer be gettable

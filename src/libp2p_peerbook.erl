@@ -57,31 +57,32 @@
 %% API
 %%
 
--spec put(peerbook(), [libp2p_peer:peer()]) -> ok | {error, term()}.
-put(Handle=#peerbook{pubkey_bin=ThisPeerId}, PeerList) ->
-    NewPeers = lists:filtermap(fun(NewPeer) ->
-                                       NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
-                                       case unsafe_fetch_peer(NewPeerId, Handle) of
-                                           {error, not_found} -> {true, {NewPeerId, NewPeer}};
-                                           {ok, ExistingPeer} ->
-                                               case
-                                                   %% Only store peers that meet some key criteria
-                                                   NewPeerId /= ThisPeerId
-                                                   andalso libp2p_peer:verify(NewPeer)
-                                                   andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
-                                                   andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
-                                                   andalso peer_allowable(Handle, NewPeer) of
-                                                   true -> {true, {NewPeerId, NewPeer}};
-                                                   false -> false
-                                               end
-                                       end
-                               end, PeerList),
-    % Add new peers to the store
-    lists:foreach(fun({PeerID, Peer}) -> store_peer(PeerID, Peer, Handle) end, NewPeers),
-    % Notify group of new peers
-    gen_server:cast(peerbook_pid(Handle), {handle_changed_peers, {add, maps:from_list(NewPeers)}}),
-    ok.
-
+-spec put(peerbook(), libp2p_peer:peer()) -> ok | {error, term()}.
+put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
+    PutValid = fun(PeerId, Peer) ->
+                       store_peer(PeerId, Peer, Handle),
+                       %% Notify group of new peers
+                       gen_server:cast(peerbook_pid(Handle), {handle_changed_peers,
+                                                              {add, #{PeerId => NewPeer}}})
+               end,
+    NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
+    case unsafe_fetch_peer(NewPeerId, Handle) of
+        {error, not_found} ->
+            PutValid(NewPeerId, NewPeer);
+        {ok, ExistingPeer} ->
+            case
+                %% Only store peers that meet some key criteria
+                NewPeerId /= ThisPeerId
+                andalso libp2p_peer:verify(NewPeer)
+                andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
+                andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
+                andalso peer_allowable(Handle, NewPeer) of
+                true ->
+                    PutValid(NewPeerId, NewPeer);
+                false ->
+                    {error, not_allowed}
+            end
+    end.
 
 -spec get(peerbook(), libp2p_crypto:pubkey_bin()) -> {ok, libp2p_peer:peer()} | {error, term()}.
 get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->

@@ -111,10 +111,10 @@ found in the store or has gone stale.
 
 ## Putting peers
 
-Put one or more peer records in the store using:
+Put a peer recors in the store using:
 
 ```erlang
-    libp2p_peerbook:put(Handle, [Peer])
+    libp2p_peerbook:put(Handle, Peer)
 ```
 
 Where `Peer` is a signed peer record. The peerbook will validate the
@@ -123,8 +123,7 @@ whether the peer is stale and supersedes an existing entry and that
 the network id is acceptable.
 
 Any peers passing validation will be stored and sent out on the next
-local notification. Invalid peers are ignored and no error is
-returned.
+local notification. An errir is returned for Invalid peers.
 
 ## Notifications
 
