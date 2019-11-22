@@ -38,9 +38,9 @@ peerbook
 
 Local peer change notification. When the self record changes or any
 new records are put in the store the peerbook will send a local
-notification `{new_peers, PeerList}` with all the new or changed
-peers. To limit the rate of notifications, the `notification_time`
-option can be used.
+notification `{changed_peers, ChangeTuple}` with all the add and
+removed peers since the last notification. To set the rate of
+notifications, the `notification_time` option can be used.
 
 ### Signed metadata
 
