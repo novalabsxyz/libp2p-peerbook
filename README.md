@@ -142,7 +142,7 @@ After which the process `Pid` will receive messages with the following
 format:
 
 ```erlang
-    {changed_peers, #{ add => AddMap, remove => RemoveSet }}
+    {changed_peers, { {add, AddMap}, {remove,RemoveSet} }}
 ```
 
 Where `AddMap` is a map of peer public key binaries to peers and
