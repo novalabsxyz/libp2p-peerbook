@@ -14,41 +14,51 @@ in the network.
 The following key features define what a peerbook does with the peer
 records it maintains:
 
-* The **self** record is the peer record defined by the public key
-  binary passed into the peerbook using the requires `pubkey_bin`
-  option when it is started.
+### The self record
 
-  The self peer record can not be updated through an API but is
-  updated on a regular schedule.  To be able to sign the peer record
-  the peerbook requires a signing function passed in with the
-  `sig_fun` option.
+The *self** record is the peer record defined by the public key binary
+passed into the peerbook using the requires `pubkey_bin` option when
+it is started.
 
-  To affect the data that goes into the self record use the `set_` and
-  `register_` functions in the peerbook API.
+The self peer record can not be updated through an API but is updated
+on a regular schedule.  To be able to sign the peer record the
+peerbook requires a signing function passed in with the `sig_fun`
+option.
 
-* Peer records in the peerbook are expired after a configurable
-  `stale_time` after which the record is no longer retrievable from
-  the peerbook
+To affect the data that goes into the self record use the `set_` and
+`register_` functions in the peerbook API.
 
-* Local peer change notification. When the self record changes or any
-  new records are put in the store the peerbook will send a local
-  notification `{new_peers, PeerList}` with all the new or changed
-  peers. To limit the rate of notifications, the `notification_time`
-  option can be used.
+### Record expiration
 
-* Metadata can be associated with the self peer and is included in the
-  signed peer record. The `metadata_fun`option can be used to supply a
-  function that is called every time the self peer is updated by the
-  peerbook.
+Peer records in the peerbook are expired after a configurable
+`stale_time` after which the record is no longer retrievable from the
+peerbook
 
-* The peerbook will only accept peer records that have the same
-  `network_id` as the peerbook is configured with. This allows multiple
-  overlapping swarms to run without affecting each other by using
-  different network ids.
+### Change notification
 
-  *Note:* The default network id allows peer records from any
-  host. Set the network id before actually using a peerbook in a
-  production network.
+Local peer change notification. When the self record changes or any
+new records are put in the store the peerbook will send a local
+notification `{new_peers, PeerList}` with all the new or changed
+peers. To limit the rate of notifications, the `notification_time`
+option can be used.
+
+### Signed metadata
+
+Metadata can be associated with the self peer and is included in the
+signed peer record. The `metadata_fun`option can be used to supply a
+function that is called every time the self peer is updated by the
+peerbook.
+
+### Network ID
+
+The peerbook will only accept peer records that have the same
+`network_id` as the peerbook is configured with. This allows multiple
+overlapping swarms to run without affecting each other by using
+different network ids.
+
+**Note:** The default network id allows peer records from any
+host. Set the network id before actually using a peerbook in a
+production network.
 
 ## Using the library
 
