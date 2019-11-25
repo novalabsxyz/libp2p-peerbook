@@ -71,6 +71,9 @@ Add the library to your `rebar.config` deps section:
        ]}.
 ```
 
+**Note:** This library depends on `rocksdb` which requires a working
+`cmake` implemention.
+
 ## Creating a peerbook instance
 
 Usually a peerbook is created as part of a libp2p swarm instance,
