@@ -71,8 +71,11 @@ Add the library to your `rebar.config` deps section:
        ]}.
 ```
 
-**Note:** This library depends on `rocksdb` which requires a working
-`cmake` implemention.
+**Note:** This library has a few system dependencies. Make sure the
+following are installed on your system before using:
+
+ * cmake
+ * libsodium
 
 ## Creating a peerbook instance
 
