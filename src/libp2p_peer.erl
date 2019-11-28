@@ -19,7 +19,7 @@
 -type metadata() :: [{string(), binary()}].
 -export_type([peer/0, peer_map/0, nat_type/0]).
 
--export([from_map/2, encode/1, decode/1, encode_list/1, decode_list/1, verify/1,
+-export([from_map/2, encode/2, decode/1, verify/1,
          pubkey_bin/1, listen_addrs/1, connected_peers/1, nat_type/1, timestamp/1,
          supersedes/2, is_stale/2, is_similar/2, network_id/1, network_id_allowable/2]).
 %% signed metadata
@@ -222,24 +222,14 @@ cleared_listen_addrs(Peer=#libp2p_signed_peer_pb{}) ->
                                sets:from_list(blacklist(Peer)))).
 
 
-%% @doc Encodes the given peer into its binary form.
--spec encode(peer()) -> binary().
-encode(Msg=#libp2p_signed_peer_pb{}) ->
+%% @doc Encodes the given peer into its binary form. The peer is
+%% stripped from its metadata before encoding if `Strip' is `true'.
+-spec encode(peer(), Strip::boolean()) -> binary().
+encode(Msg=#libp2p_signed_peer_pb{}, true) ->
+    {ok, Stripped} = metadata_set(Msg, []),
+    libp2p_peer_pb:encode_msg(Stripped);
+encode(Msg=#libp2p_signed_peer_pb{}, false) ->
     libp2p_peer_pb:encode_msg(Msg).
-
-%% @doc Encodes a given list of peer into a binary form. Since
-%% encoding lists is primarily used for gossipping peers around, this
-%% strips metadata from the peers as part of encoding.
--spec encode_list([peer()]) -> binary().
-encode_list(List) ->
-    StrippedList = [begin {ok, Stripped} = metadata_set(P, []), Stripped end || P <- List],
-    libp2p_peer_pb:encode_msg(#libp2p_peer_list_pb{peers=StrippedList}).
-
-%% @doc Decodes a given binary into a list of peers.
--spec decode_list(binary()) -> {ok, [peer()]} | {error, term()}.
-decode_list(Bin) ->
-    List = libp2p_peer_pb:decode_msg(Bin, libp2p_peer_list_pb),
-    {ok, List#libp2p_peer_list_pb.peers}.
 
 %% @doc Decodes a given binary into a peer. Note that a decoded peer
 %% may not verify, so ensure to call `verify' before actually using
@@ -316,7 +306,7 @@ coding_test() ->
     SigFun2 = libp2p_crypto:mk_sig_fun(PrivKey2),
 
     {ok, Peer1} = mk_peer(#{connected => [libp2p_crypto:pubkey_to_bin(PubKey2)]}),
-    {ok, DecodedPeer} = libp2p_peer:decode(libp2p_peer:encode(Peer1)),
+    {ok, DecodedPeer} = libp2p_peer:decode(libp2p_peer:encode(Peer1, false)),
 
     %% check if decoded is the same as original
     ?assert(libp2p_peer:pubkey_bin(Peer1) == libp2p_peer:pubkey_bin(DecodedPeer)),
@@ -347,15 +337,6 @@ coding_test() ->
 
     ok.
 
-coding_list_test() ->
-    {ok, Peer1} = mk_peer(#{}),
-
-    {ok, PeerList = [Peer1, Peer1]} = libp2p_peer:decode_list(libp2p_peer:encode_list([Peer1, Peer1])),
-
-    ?assert(lists:all(fun libp2p_peer:verify/1, PeerList)),
-
-    ok.
-
 blacklist_test() ->
     BlackListAddr = "/ip4/8.8.8.8/tcp/1234",
     ListenAddrs = [BlackListAddr, "/ip4/9.9.9.9/tcp/1234"],
@@ -375,7 +356,7 @@ blacklist_test() ->
     ?assertEqual([BlackListAddr], libp2p_peer:blacklist(Peer3)),
 
     %% Ensure metadata like blacklist is stripped on list encode
-    {ok, [DecodedPeer]} = libp2p_peer:decode_list(libp2p_peer:encode_list([Peer2])),
+    {ok, DecodedPeer} = libp2p_peer:decode(libp2p_peer:encode(Peer2, true)),
     ?assertEqual([], libp2p_peer:blacklist(DecodedPeer)),
 
     ok.

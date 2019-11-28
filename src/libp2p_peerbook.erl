@@ -425,7 +425,7 @@ fetch_peers(State=#peerbook{}) ->
 
 -spec store_peer(libp2p_crypto:pubkey_bin(), libp2p_peer:peer(), peerbook()) -> ok | {error, term()}.
 store_peer(Key, Peer, #peerbook{store=Store}) ->
-    case rocksdb:put(Store, Key, libp2p_peer:encode(Peer), []) of
+    case rocksdb:put(Store, Key, libp2p_peer:encode(Peer, false), []) of
         {error, Error} -> {error, Error};
         ok -> ok
     end.
