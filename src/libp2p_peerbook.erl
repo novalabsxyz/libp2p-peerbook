@@ -1,4 +1,9 @@
+%% @doc A peer storage service for p2p networks
+%%
+%%
 -module(libp2p_peerbook).
+
+-include("libp2p_peerbook.hrl").
 
 %% api
 -export([keys/1, values/1, put/2, get/2, is_key/2, remove/2,
@@ -40,19 +45,6 @@
           metadata_fun :: fun(() -> #{binary() => binary}),
           sig_fun :: fun((binary()) -> binary())
         }).
-
-%% Name used as a basename in ets table
--define(SERVICE, peerbook).
-
-%% Default peer stale time is 24 hours (in milliseconds)
--define(DEFAULT_STALE_TIME, 24 * 60 * 60 * 1000).
-%% Defailt "this" peer heartbeat time 5 minutes (in milliseconds)
--define(DEFAULT_PEER_TIME, 5 * 60 * 1000).
-%% Default timer for new peer notifications to connected peers. This
-%% allows for fast arrivels to coalesce a number of new peers before a
-%% new list is sent out.
--define(DEFAULT_NOTIFY_TIME, 5 * 1000).
-
 
 %%
 %% API
@@ -98,7 +90,7 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
                 true ->
                     PutValid(NewPeerId, NewPeer);
                 false ->
-                    {error, not_allowed}
+                    {error, invalid}
             end
     end.
 
@@ -255,7 +247,7 @@ set_nat_type(Handle=#peerbook{}, NatType) ->%
 %% peerbook handle.
 -spec peerbook_pid(peerbook()) -> pid().
 peerbook_pid(#peerbook{tid = TID}) ->
-    ets:lookup_element(TID, {?SERVICE, pid}, 2).
+    ets:lookup_element(TID, {?PEERBOOK_SERVICE, pid}, 2).
 
 %% @doc Get the handle for a peerbook pid.
 %%
@@ -288,29 +280,29 @@ init(Opts = #{ sig_fun := SigFun,
                   ets:new(?MODULE, [ordered_set, {read_concurrency, true}]);
               Table -> Table
           end,
-    ets:insert(TID, {{?SERVICE, pid}, self()}),
+    ets:insert(TID, {{?PEERBOOK_SERVICE, pid}, self()}),
     %% Ensure data folder is available
-    DataDir = filename:join([maps:get(data_dir, Opts, "data"), ?SERVICE]),
+    DataDir = filename:join([maps:get(data_dir, Opts, "data"), ?PEERBOOK_SERVICE]),
     ok = filelib:ensure_dir(DataDir),
 
     %% Create unique peer notification group
-    GroupName = pg2:create([?SERVICE, make_ref()]),
+    GroupName = pg2:create([?PEERBOOK_SERVICE, make_ref()]),
     ok = pg2:create(GroupName),
 
     %% Fire of the associated timeout to start the notify cycle
     self() ! notify_timeout,
 
-    StaleTime = maps:get(stale_time, Opts, ?DEFAULT_STALE_TIME),
+    StaleTime = maps:get(stale_time, Opts, ?PEERBOOK_DEFAULT_STALE_TIME),
     MkState = fun(Handle) ->
                       #state{peerbook=Handle,
                              notify_group = GroupName,
                              metadata_fun = MetaDataFun,
                              sig_fun = SigFun,
-                             peer_time = maps:get(peer_time, Opts, ?DEFAULT_PEER_TIME),
-                             notify_time = maps:get(notify_time, Opts, ?DEFAULT_NOTIFY_TIME)}
+                             peer_time = maps:get(peer_time, Opts, ?PEERBOOK_DEFAULT_PEER_TIME),
+                             notify_time = maps:get(notify_time, Opts, ?PEERBOOK_DEFAULT_NOTIFY_TIME)}
               end,
 
-    case ets:lookup(TID, {?SERVICE, handle}) of
+    case ets:lookup(TID, {?PEERBOOK_SERVICE, handle}) of
         [] ->
             DBOpts = application:get_env(rocksdb, global_opts, []),
             %% Do a repar just in case DB gets corrupted
@@ -326,7 +318,7 @@ init(Opts = #{ sig_fun := SigFun,
                                        pubkey_bin = PubKeyBin,
                                        network_id = NetworkID,
                                        stale_time = StaleTime},
-                    ets:insert(TID, {{?SERVICE, handle}, Handle}),
+                    ets:insert(TID, {{?PEERBOOK_SERVICE, handle}, Handle}),
                     {ok, update_this_peer(MkState(Handle))}
             end;
         [{_, Handle}] ->
