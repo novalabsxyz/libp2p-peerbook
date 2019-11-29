@@ -277,7 +277,7 @@ start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin}) ->
                           Opts#{metadata_fun => MetaDataFun,
                                 network_id => NetworkID
                                }, []).
-
+%% @private
 init(Opts = #{ sig_fun := SigFun,
                metadata_fun := MetaDataFun,
                network_id := NetworkID,
@@ -334,6 +334,7 @@ init(Opts = #{ sig_fun := SigFun,
             {ok, update_this_peer(MkState(Handle))}
     end.
 
+%% @private
 handle_call(update_this_peer, _From, State) ->
     {reply, update_this_peer(State), State};
 handle_call(peerbook, _From, State) ->
@@ -342,6 +343,7 @@ handle_call(Msg, _From, State) ->
     lager:warning("Unhandled call: ~p", [Msg]),
     {reply, ok, State}.
 
+%% @private
 handle_cast({handle_changed_peers, Change}, State) ->
     {noreply, handle_changed_peers(Change, State)};
 handle_cast({set_nat_type, UpdatedNatType}, State=#state{}) ->
@@ -382,6 +384,7 @@ handle_cast(Msg, State) ->
     lager:warning("Unhandled cast: ~p", [Msg]),
     {noreply, State}.
 
+%% @private
 handle_info(peer_timeout, State=#state{}) ->
     {noreply, update_this_peer(mk_this_peer(State), State)};
 handle_info(notify_timeout, State=#state{}) ->
@@ -391,6 +394,7 @@ handle_info(Msg, State) ->
     lager:warning("Unhandled info: ~p", [Msg]),
     {noreply, State}.
 
+%% @private
 terminate(shutdown, State=#state{peerbook=#peerbook{store=Store}}) ->
     %% only close the db on shutdown
     rocksdb:close(Store),

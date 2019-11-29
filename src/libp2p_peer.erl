@@ -1,8 +1,6 @@
 %% @copyright Helium Systems, Inc.
 %%
 %% @doc A peeer record represents the current state of a peer on the libp2p network.
-%%
-%% This is a test
 -module(libp2p_peer).
 
 -include("pb/libp2p_peer_pb.hrl").
@@ -134,6 +132,10 @@ network_id(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{network_id = <<>>}}) ->
 network_id(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{network_id=ID}}) ->
     ID.
 
+%% @doc Returns whether a givne network id is compatible with this peer.
+%%
+%% A network id is compatible with the network id of this peer if they
+%% are equal or if either of them is `undefined'
 network_id_allowable(Peer, MyNetworkID) ->
     network_id(Peer) == MyNetworkID
     orelse libp2p_peer:network_id(Peer) == undefined
