@@ -3,9 +3,10 @@
 %% api
 -export([keys/1, values/1, put/2, get/2, is_key/2, remove/2,
          peerbook_pid/1, peerbook_handle/1,
-         stale_time/1, join_notify/2, set_nat_type/2,
+         join_notify/2, leave_notify/2,
+         stale_time/1, set_nat_type/2,
          register_listen_addr/2, unregister_listen_addr/2, blacklist_listen_addr/3,
-         register_session/3, unregister_session/2]).
+         register_session/2, unregister_session/2]).
 %% gen_server
 -export([start_link/1, init/1, handle_call/3, handle_info/2, handle_cast/2, terminate/2]).
 
@@ -34,7 +35,7 @@
           notify_timer=undefined :: reference() | undefined,
           notify_peers={{add, #{}},
                         {remove, sets:new()}} :: {change_add_descriptor(), change_remove_descriptor()},
-          sessions=[] :: [{libp2p_crypto:pubkey_bin(), pid()}],
+          sessions=sets:new() :: sets:set(libp2p_crypto:pubkey_bin()),
           listen_addrs=[] :: [string()],
           metadata_fun :: fun(() -> #{binary() => binary}),
           sig_fun :: fun((binary()) -> binary())
@@ -57,6 +58,24 @@
 %% API
 %%
 
+%% @doc Add a peer record to the peerbook
+%%
+%% The peer is validated before being allowed into the peerbook. The
+%% peer must:
+%%
+%% <ul>
+%%
+%% <li> Verify it's signature </li>
+%% <li> Be more recent than an existing peer record for the same public key in the store </li>
+%% <li> Not be stale according to the configured `stale_time' for this peerbook </li>
+%% <li> Have a network_id that is compatible with the peerbook network id </li>
+%% <li> Have a network_id that is compatible with the peerbook network id </li>
+%%
+%% </ul>
+%%
+%% If the peer validates it is added to the store and notified locally
+%% as a changed peer. If the peer does not validate an error is
+%% returned
 -spec put(peerbook(), libp2p_peer:peer()) -> ok | {error, term()}.
 put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
     PutValid = fun(PeerId, Peer) ->
@@ -75,7 +94,6 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
                 NewPeerId /= ThisPeerId
                 andalso libp2p_peer:verify(NewPeer)
                 andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
-                andalso not libp2p_peer:is_similar(NewPeer, ExistingPeer)
                 andalso peer_allowable(Handle, NewPeer) of
                 true ->
                     PutValid(NewPeerId, NewPeer);
@@ -84,6 +102,10 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
             end
     end.
 
+%% @doc Get a peer from the peerbook given a peer key in it's binary
+%% form. Note that peers will expire out of the peerbook after a
+%% configured `stale_time', which means a previously available peer
+%% may not be available when requested again.
 -spec get(peerbook(), libp2p_crypto:pubkey_bin()) -> {ok, libp2p_peer:peer()} | {error, term()}.
 get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
     case unsafe_fetch_peer(ID, Handle) of
@@ -99,6 +121,7 @@ get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
             end
     end.
 
+%% @doc Returns if a given peerk key is available in the store.
 -spec is_key(peerbook(), libp2p_crypto:pubkey_bin()) -> boolean().
 is_key(Handle=#peerbook{}, ID) ->
     case get(Handle, ID) of
@@ -106,14 +129,21 @@ is_key(Handle=#peerbook{}, ID) ->
         {ok, _} -> true
     end.
 
+%% @doc Gets all the keys available in the peerbook store
 -spec keys(peerbook()) -> [libp2p_crypto:pubkey_bin()].
 keys(Handle=#peerbook{}) ->
     fetch_keys(Handle).
 
+%% @doc Gets all the values available in the peerbook
 -spec values(peerbook()) -> [libp2p_peer:peer()].
 values(Handle=#peerbook{}) ->
     fetch_peers(Handle).
 
+%% @doc Removes the peer for a given peer key.
+%%
+%% Returns an error if the key is not found, or if the key is the
+%% `pubkey_bin' key that the peerbook manages. If successful the
+%% peerbook will notify our a chnage to any registered listeners.
 -spec remove(peerbook(), libp2p_crypto:pubkey_bin()) -> ok | {error, term()}.
 remove(Handle=#peerbook{pubkey_bin=ThisPeerId}, ID) ->
      case ID == ThisPeerId of
@@ -128,10 +158,40 @@ remove(Handle=#peerbook{pubkey_bin=ThisPeerId}, ID) ->
              end
      end.
 
+%% @doc Returns the configured `stale_time' for a peerbook
 -spec stale_time(peerbook()) -> pos_integer().
 stale_time(#peerbook{stale_time=StaleTime}) ->
     StaleTime.
 
+%% @doc Join the peerbook change notification group.
+%%
+%% Adds the given pid to the progress group that is notified of
+%% changes to the peerbook. Change notification is collected for a
+%% configurable `notify_time' before it is sent out.
+%%
+%% When the peerbook changes a tuple is sent out with form
+%% `{changed_peers, {{add, ChangeAdd}, {remove, ChangeRemove}}}',
+%% where `ChangeAdd' is a map of peer keys to peers and `ChangeRemove'
+%% is a `set' of removed peer keys.
+-spec join_notify(peerbook(), pid()) -> ok.
+join_notify(Handle=#peerbook{}, Joiner) ->
+    gen_server:cast(peerbook_pid(Handle), {join_notify, Joiner}).
+
+%% @doc Remove a given pid from peerbook notifications.
+-spec leave_notify(peerbook(), pid()) -> ok.
+leave_notify(Handle=#peerbook{}, Pid) ->
+    gen_server:cast(peerbook_pid(Handle), {leave_notify, Pid}).
+
+%% @doc Black list a given listen address for a peer.
+%%
+%% This is a utility method to add a given listen address (in
+%% multiaddr form) to the metadata of the peer with the given peer
+%% key. Blacklist metadata is used by networking code to avoid certain
+%% listen addresses if they're not reachable.
+%%
+%% Since the blacklist is stored in the metadata for a peer it is NOT
+%% gossipped over the network and it DOES expire when the peer record
+%% expires.
 -spec blacklist_listen_addr(peerbook(), libp2p_crypto:pubkey_bin(), ListenAddr::string())
                            -> ok | {error, not_found}.
 blacklist_listen_addr(Handle=#peerbook{}, ID, ListenAddr) ->
@@ -143,34 +203,65 @@ blacklist_listen_addr(Handle=#peerbook{}, ID, ListenAddr) ->
             store_peer(ID, UpdatedPeer, Handle)
     end.
 
--spec join_notify(peerbook(), pid()) -> ok.
-join_notify(Handle=#peerbook{}, Joiner) ->
-    gen_server:cast(peerbook_pid(Handle), {join_notify, Joiner}).
+%% @doc Registers a session with a remote peer with the peerbook.
+%%
+%% A session is represented as the public binary key of the remote
+%% peer, and is maintained as part of the "self" peer record that the
+%% peerbook maintains for `pubkey_bin'.
+-spec register_session(peerbook(), SessionPubKeyBin::libp2p_crypto:pubkey_bin()) -> ok.
+register_session(Handle=#peerbook{}, SessionPubKeyBin) ->
+    gen_server:cast(peerbook_pid(Handle), {register_session, SessionPubKeyBin}).
 
--spec register_session(peerbook(), libp2p_crypto:pubkey_bin(), pid()) -> ok.
-register_session(Handle=#peerbook{}, SessionPubKeyBin, SessionPid) ->
-    gen_server:cast(peerbook_pid(Handle), {register_session, {SessionPubKeyBin, SessionPid}}).
-
+%% @doc Removes a session from the list of sessions for the peerbook.
+%%
+%%  This removes the session key managed for the "self" peer managed
+%%  by the peerbook.
 -spec unregister_session(peerbook(), pid()) -> ok.
 unregister_session(Handle=#peerbook{}, SessionPid) ->
     gen_server:cast(peerbook_pid(Handle), {unregister_session, SessionPid}).
 
+%% @doc Registers a listen address.
+%%
+%% Registers a network listen address in multiaddr form for the "self"
+%% record for this peerbook. A change notification is sent out for the
+%% "self" record.
 -spec register_listen_addr(peerbook(), ListenAddr::string()) -> ok.
 register_listen_addr(Handle=#peerbook{}, ListenAddr) ->
      gen_server:cast(peerbook_pid(Handle), {register_listen_addr, ListenAddr}).
 
+%% @doc Removes a listen address.
+%%
+%% Removes a network listen address in multiaddr form from the "self"
+%% record for this peerbook.A change notification is sent out for the
+%% "self" record.
 -spec unregister_listen_addr(peerbook(), ListenAddr::string()) -> ok.
 unregister_listen_addr(Handle=#peerbook{}, ListenAddr) ->
      gen_server:cast(peerbook_pid(Handle), {unregister_listen_addr, ListenAddr}).
 
+%% @doc Sets the NAT type for the peerbook.
+%%
+%% The peerbook manages the `nat_type' for the "self" record
+%% identified by `pubkey_bin'. Changing the nat type will updathe
+%% "self" record and will send out a change notification.
 -spec set_nat_type(peerbook(), libp2p_peer:nat_type()) -> ok.
 set_nat_type(Handle=#peerbook{}, NatType) ->%
     gen_server:cast(peerbook_pid(Handle), {set_nat_type, NatType}).
 
+%% @doc Get the pid for a peerbook handle.
+%%
+%% Most functions int he peerbook can be done through a thread safe
+%% "handle". For the ones where state is involved the actual peerbook
+%% pid is required. Thisutility method gets the pid for a given
+%% peerbook handle.
 -spec peerbook_pid(peerbook()) -> pid().
 peerbook_pid(#peerbook{tid = TID}) ->
     ets:lookup_element(TID, {?SERVICE, pid}, 2).
 
+%% @doc Get the handle for a peerbook pid.
+%%
+%% Most functions int he peerbook can be done through a thread safe
+%% "handle". This utility method retrieves the handle, given the
+%% peerbook pid.
 -spec peerbook_handle(pid()) -> {ok, peerbook()} | {error, term()}.
 peerbook_handle(Pid) ->
     gen_server:call(Pid, peerbook).
@@ -255,13 +346,23 @@ handle_cast({handle_changed_peers, Change}, State) ->
     {noreply, handle_changed_peers(Change, State)};
 handle_cast({set_nat_type, UpdatedNatType}, State=#state{}) ->
     {noreply, update_this_peer(State#state{nat_type=UpdatedNatType})};
-handle_cast({unregister_session, SessionPid}, State=#state{sessions=Sessions}) ->
-    NewSessions = lists:filter(fun({_Addr, Pid}) -> Pid /= SessionPid end, Sessions),
-    {noreply, update_this_peer(State#state{sessions=NewSessions})};
-handle_cast({register_session, {SessionPubKeyBin, SessionPid}},
+handle_cast({unregister_session, SessionPubKeyBin}, State=#state{sessions=Sessions}) ->
+    case sets:is_element(SessionPubKeyBin, Sessions) of
+        false ->
+            {noreply, State};
+        true ->
+            NewSessions = sets:del_element(SessionPubKeyBin, Sessions),
+            {noreply, update_this_peer(State#state{sessions=NewSessions})}
+    end;
+handle_cast({register_session, SessionPubKeyBin},
             State=#state{sessions=Sessions}) ->
-    NewSessions = [{SessionPubKeyBin, SessionPid} | Sessions],
-    {noreply, update_this_peer(State#state{sessions=NewSessions})};
+    case sets:is_element(SessionPubKeyBin, Sessions) of
+        true ->
+            {noreply, State};
+        false ->
+            NewSessions = sets:add_element(SessionPubKeyBin, Sessions),
+            {noreply, update_this_peer(State#state{sessions=NewSessions})}
+    end;
 handle_cast({unregister_listen_addr, ListenAddr}, State=#state{}) ->
     ListenAddrs = lists:filter(fun(Addr) -> Addr /= ListenAddr end, State#state.listen_addrs),
     {noreply, update_this_peer(State#state{listen_addrs=ListenAddrs})};
@@ -311,7 +412,6 @@ peer_allowable(Handle=#peerbook{}, Peer) ->
 
 -spec mk_this_peer(#state{}) -> {ok, libp2p_peer:peer()} | {error, term()}.
 mk_this_peer(State=#state{}) ->
-    ConnectedAddrs = sets:to_list(sets:from_list([Addr || {Addr, _} <- State#state.sessions])),
     %% if the metadata fun crashes, simply return an empty map
     MetaData = try (State#state.metadata_fun)() of
                    Result ->
@@ -321,7 +421,7 @@ mk_this_peer(State=#state{}) ->
                end,
     libp2p_peer:from_map(#{ pubkey_bin => State#state.peerbook#peerbook.pubkey_bin,
                             listen_addrs => State#state.listen_addrs,
-                            connected => ConnectedAddrs,
+                            connected => sets:to_list(State#state.sessions),
                             nat_type => State#state.nat_type,
                             network_id => State#state.peerbook#peerbook.network_id,
                             signed_metadata => MetaData},
@@ -333,13 +433,10 @@ update_this_peer(State=#state{}) ->
         {error, not_found} ->
             NewPeer = mk_this_peer(State),
             update_this_peer(NewPeer, State);
-        {ok, OldPeer} ->
+        {ok, _} ->
             case mk_this_peer(State) of
                 {ok, NewPeer} ->
-                    case libp2p_peer:is_similar(NewPeer, OldPeer) of
-                        true -> State;
-                        false -> update_this_peer({ok, NewPeer}, State)
-                    end;
+                    update_this_peer({ok, NewPeer}, State);
                 {error, Error} ->
                     lager:notice("Failed to make peer: ~p", [Error]),
                     State

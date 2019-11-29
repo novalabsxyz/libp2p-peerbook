@@ -109,14 +109,18 @@ session_test(Config) ->
     ?assertEqual([], libp2p_peer:connected_peers(ThisPeer)),
 
     %% register a session key.. just reuse the one we already have
-    libp2p_peerbook:register_session(Handle, PubKeyBin, self()),
+    libp2p_peerbook:register_session(Handle, PubKeyBin),
+    %% And register it again to ensure it only comes listed once
+    libp2p_peerbook:register_session(Handle, PubKeyBin),
 
     %% confirm it's stored
     ?assertAsync({ok, Peer} = libp2p_peerbook:get(Handle, PubKeyBin),
                  [PubKeyBin] == libp2p_peer:connected_peers(Peer)),
 
     %% unregister the session address
-    libp2p_peerbook:unregister_session(Handle, self()),
+    libp2p_peerbook:unregister_session(Handle, PubKeyBin),
+    %% Unregistering again has no effect
+    libp2p_peerbook:unregister_session(Handle, PubKeyBin),
     %% confirm it's cleared
     ?assertAsync({ok, Peer} = libp2p_peerbook:get(Handle, PubKeyBin),
                  [] == libp2p_peer:connected_peers(Peer)),
@@ -221,6 +225,8 @@ notify_test(Config) ->
     after 1000 ->
             ct:fail(timeout_notify)
     end,
+
+    libp2p_peerbook:leave_notify(Handle, self()),
 
     ok.
 

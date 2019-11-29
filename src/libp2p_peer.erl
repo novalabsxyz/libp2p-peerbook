@@ -21,7 +21,7 @@
 
 -export([from_map/2, encode/2, decode/1, verify/1,
          pubkey_bin/1, listen_addrs/1, connected_peers/1, nat_type/1, timestamp/1,
-         supersedes/2, is_stale/2, is_similar/2, network_id/1, network_id_allowable/2]).
+         supersedes/2, is_stale/2, network_id/1, network_id_allowable/2]).
 %% signed metadata
 -export([signed_metadata/1, signed_metadata_get/3]).
 %% metadata (unsigned!)
@@ -126,35 +126,6 @@ metadata_get(Peer=#libp2p_signed_peer_pb{}, Key, Default) ->
 supersedes(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=ThisTimestamp}},
            #libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
     ThisTimestamp > OtherTimestamp.
-
-%% @doc Returns whether a given `Target' is mostly equal to an `Other'
-%% peer. Similarity means equality for all fields, except for the
-%% timestamp of the peers.
--spec is_similar(Target::peer(), Other::peer()) -> boolean().
-is_similar(Target=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=TargetTimestamp}},
-           Other=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
-    %% if the set difference is greater than a quarter the old set
-    %% size, or it has been three minutes since the original was
-    %% published, we're no longer similar
-    TSet = sets:from_list(connected_peers(Target)),
-    OSet = sets:from_list(connected_peers(Other)),
-    TSize = sets:size(TSet),
-    OSize = sets:size(OSet),
-    Intersection = sets:intersection(TSet, OSet),
-    IntSize = sets:size(Intersection),
-    ConnDiffPct = application:get_env(libp2p, similarity_conn_pct, 0.3333),
-    ConnPeersSimilar = (OSize == TSize andalso OSize == 0) orelse
-        (IntSize > (OSize * ConnDiffPct) andalso TSize < (OSize * 2)),
-
-    TimeDiffMinutes = application:get_env(libp2p, similarity_time_diff_mins, 6),
-    TimestampSimilar = TargetTimestamp < (OtherTimestamp + timer:minutes(TimeDiffMinutes)),
-
-    pubkey_bin(Target) == pubkey_bin(Other)
-        andalso nat_type(Target) == nat_type(Other)
-        andalso network_id(Target) == network_id(Other)
-        andalso sets:from_list(listen_addrs(Target)) == sets:from_list(listen_addrs(Other))
-        andalso ConnPeersSimilar
-        andalso TimestampSimilar.
 
 %% @doc Returns the declared network id for the peer, if any
 -spec network_id(peer()) -> binary() | undefined.
@@ -318,8 +289,7 @@ coding_test() ->
     ?assert(libp2p_peer:network_id(Peer1) == libp2p_peer:network_id(DecodedPeer)),
     ?assert(libp2p_peer:signed_metadata(Peer1) == libp2p_peer:signed_metadata(DecodedPeer)),
 
-    %% Check simple similarity and signature verify
-    ?assert(libp2p_peer:is_similar(Peer1, DecodedPeer)),
+    %% Check signature verify
     ?assert(libp2p_peer:verify(Peer1)),
 
     %% ensure signing with a different sigfun invalidates the verify
