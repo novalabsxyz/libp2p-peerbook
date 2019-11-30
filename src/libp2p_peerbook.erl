@@ -38,6 +38,8 @@
           sessions=sets:new() :: sets:set(libp2p_crypto:pubkey_bin()),
           listen_addrs=[] :: [string()],
           metadata_fun :: fun(() -> #{binary() => binary}),
+          metadata = #{} :: map(),
+          metadata_ref = undefined :: undefined | reference(),
           sig_fun :: fun((binary()) -> binary())
         }).
 
@@ -385,8 +387,13 @@ handle_cast(Msg, State) ->
     {noreply, State}.
 
 %% @private
-handle_info(peer_timeout, State=#state{}) ->
-    {noreply, update_this_peer(mk_this_peer(State), State)};
+handle_info({'DOWN', Ref, _, _, _}, State=#state{metadata_ref=Ref}) ->
+    {noreply, State#state{metadata_ref=undefined}};
+handle_info({signed_metadata, MetaData}, State=#state{}) ->
+    {noreply, State#state{metadata=MetaData}};
+handle_info(peer_timeout, State0=#state{}) ->
+    {NewPeer, State} = mk_this_peer(State0),
+    {noreply, update_this_peer(NewPeer, get_async_signed_metadata(State))};
 handle_info(notify_timeout, State=#state{}) ->
     {noreply, notify_peers(State#state{notify_timer=undefined})};
 
@@ -413,35 +420,39 @@ peer_allowable(Handle=#peerbook{}, Peer) ->
     not libp2p_peer:is_stale(Peer, Handle#peerbook.stale_time) andalso
         libp2p_peer:network_id_allowable(Peer, Handle#peerbook.network_id).
 
+-spec get_async_signed_metadata(#state{}) -> #state{}.
+get_async_signed_metadata(State=#state{metadata_ref=undefined, metadata_fun=MetaDataFun}) ->
+    Parent = self(),
+    {_, Ref} = spawn_monitor(fun() ->
+                                     Parent ! {signed_metadata, MetaDataFun()}
+                             end),
+    State#state{metadata_ref = Ref};
+get_async_signed_metadata(State=#state{}) ->
+    State.
 
--spec mk_this_peer(#state{}) -> {ok, libp2p_peer:peer()} | {error, term()}.
+
+-spec mk_this_peer(#state{}) -> {{ok, libp2p_peer:peer()} | {error, term()}, #state{}}.
 mk_this_peer(State=#state{}) ->
-    %% if the metadata fun crashes, simply return an empty map
-    MetaData = try (State#state.metadata_fun)() of
-                   Result ->
-                       Result
-               catch
-                   _:_ -> #{}
-               end,
-    libp2p_peer:from_map(#{ pubkey_bin => State#state.peerbook#peerbook.pubkey_bin,
-                            listen_addrs => State#state.listen_addrs,
-                            connected => sets:to_list(State#state.sessions),
-                            nat_type => State#state.nat_type,
-                            network_id => State#state.peerbook#peerbook.network_id,
-                            signed_metadata => MetaData},
-                         State#state.sig_fun).
+    Result = libp2p_peer:from_map(#{ pubkey_bin => State#state.peerbook#peerbook.pubkey_bin,
+                                     listen_addrs => State#state.listen_addrs,
+                                     connected => sets:to_list(State#state.sessions),
+                                     nat_type => State#state.nat_type,
+                                     network_id => State#state.peerbook#peerbook.network_id,
+                                     signed_metadata => State#state.metadata},
+                                  State#state.sig_fun),
+    {Result, State}.
 
 -spec update_this_peer(#state{}) -> #state{}.
-update_this_peer(State=#state{}) ->
-    case unsafe_fetch_peer(State#state.peerbook#peerbook.pubkey_bin, State#state.peerbook) of
+update_this_peer(State0=#state{}) ->
+    case unsafe_fetch_peer(State0#state.peerbook#peerbook.pubkey_bin, State0#state.peerbook) of
         {error, not_found} ->
-            NewPeer = mk_this_peer(State),
-            update_this_peer(NewPeer, State);
+            {NewPeer, State} = mk_this_peer(State0),
+            update_this_peer(NewPeer, get_async_signed_metadata(State));
         {ok, _} ->
-            case mk_this_peer(State) of
-                {ok, NewPeer} ->
-                    update_this_peer({ok, NewPeer}, State);
-                {error, Error} ->
+            case mk_this_peer(State0) of
+                {{ok, NewPeer}, State} ->
+                    update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
+                {{error, Error}, State} ->
                     lager:notice("Failed to make peer: ~p", [Error]),
                     State
             end
