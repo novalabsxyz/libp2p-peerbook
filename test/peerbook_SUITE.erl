@@ -271,32 +271,32 @@ signed_metadata_test(Config) ->
     PubKeyBin = ?config(pubkey_bin, Config),
     Tab = ?config(tab, Config),
     %% Set the metdata function to a given fun
-    SetFun = fun(F) -> ets:insert(Tab, {metadata_fun, F}) end,
+    SetMetaDataFun = fun(F) -> ets:insert(Tab, {metadata_fun, F}) end,
     %% Set the metadata function to a function that counts the number
     %% of times a given fun is executed
-    SetCountedFun = fun(K, F) ->
-                            SetFun(fun() ->
-                                           ets:update_counter(Tab, K, 1, {K, 0}),
-                                           F()
-                                   end)
-                    end,
+    SetCountedMetaDataFun = fun(K, F) ->
+                                    SetMetaDataFun(fun() ->
+                                                           ets:update_counter(Tab, K, 1, {K, 0}),
+                                                           F()
+                                                   end)
+                            end,
 
     %% Try a normal metadata set
-    SetFun(fun() -> #{<<"hello">> => <<"world">>} end),
+    SetMetaDataFun(fun() -> #{<<"hello">> => <<"world">>} end),
     ?assertAsync({ok, Peer} = libp2p_peerbook:get(Handle, PubKeyBin),
                  #{ <<"hello">> => <<"world">> } == libp2p_peer:signed_metadata(Peer)),
 
 
     %% Let the metedata crash a number of times
-    SetCountedFun(crash_count,
-                  fun() -> exit(fail_metadata) end),
+    SetCountedMetaDataFun(crash_count,
+                          fun() -> exit(fail_metadata) end),
     ?assertAsyncTimes(Tab, crash_count, 20),
     %% Set to a slow function
-    SetCountedFun(sleep_count,
-                  fun() ->
-                          timer:sleep(300),
-                          #{}
-                  end),
+    SetCountedMetaDataFun(sleep_count,
+                          fun() ->
+                                  timer:sleep(300),
+                                  #{}
+                          end),
     ?assertAsyncTimes(Tab, sleep_count, 3),
 
     ok.
