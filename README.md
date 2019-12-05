@@ -151,4 +151,4 @@ format:
 ```
 
 Where `AddMap` is a map of peer public key binaries to peers and
-`RemoveSet` is a set of removed peer public key binaries.
+`RemoveSet` is a list of removed peer public key binaries.

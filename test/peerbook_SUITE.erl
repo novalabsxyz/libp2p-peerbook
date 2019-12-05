@@ -237,7 +237,7 @@ notify_test(Config) ->
         {changed_peers, {{add, Add}, {remove, Remove}}} ->
             %% We should see the self peer and peer1 added and peer 2
             %% removed
-            ?assert(sets:is_element(Peer2PubKeyBin, Remove)),
+            ?assert(lists:member(Peer2PubKeyBin, Remove)),
             ?assert(maps:is_key(PubKeyBin, Add)),
             ?assert(maps:is_key(libp2p_peer:pubkey_bin(Peer1), Add))
     after 1000 ->

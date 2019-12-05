@@ -27,7 +27,7 @@
 
 -type change_descriptor() :: change_add_descriptor() | change_remove_descriptor().
 -type change_add_descriptor() :: {add, #{libp2p_crypto:pubkey_bin() => libp2p_peer:peer()}}.
--type change_remove_descriptor() :: {remove, sets:set(libp2p_crypto:pubkey_bin())}.
+-type change_remove_descriptor() :: {remove, [libp2p_crypto:pubkey_bin()]}.
 -export_type([peerbook/0]).
 
 -record(state,
@@ -38,9 +38,8 @@
           notify_group :: any(),
           notify_time :: pos_integer(),
           notify_timer=undefined :: reference() | undefined,
-          notify_peers={{add, #{}},
-                        {remove, sets:new()}} :: {change_add_descriptor(), change_remove_descriptor()},
-          sessions=sets:new() :: sets:set(libp2p_crypto:pubkey_bin()),
+          notify_peers={{add, #{}}, {remove, []}} :: {change_add_descriptor(), change_remove_descriptor()},
+          sessions=[] :: [libp2p_crypto:pubkey_bin()],
           listen_addrs=[] :: [string()],
           metadata_fun :: fun(() -> #{binary() => binary}),
           metadata = #{} :: map(),
@@ -145,8 +144,7 @@ remove(Handle=#peerbook{pubkey_bin=ThisPeerId}, ID) ->
          false ->
              case delete_peer(ID, Handle) of
                  ok ->
-                     gen_server:cast(peerbook_pid(Handle), {handle_changed_peers,
-                                                            {remove, sets:from_list([ID])}});
+                     gen_server:cast(peerbook_pid(Handle), {handle_changed_peers, {remove, [ID]}});
                  {error, Error} ->
                      {error, Error}
              end
@@ -166,7 +164,7 @@ stale_time(#peerbook{stale_time=StaleTime}) ->
 %% When the peerbook changes a tuple is sent out with form
 %% `{changed_peers, {{add, ChangeAdd}, {remove, ChangeRemove}}}',
 %% where `ChangeAdd' is a map of peer keys to peers and `ChangeRemove'
-%% is a `set' of removed peer keys.
+%% is a list of removed peer keys.
 -spec join_notify(peerbook(), pid()) -> ok.
 join_notify(Handle=#peerbook{}, Joiner) ->
     gen_server:cast(peerbook_pid(Handle), {join_notify, Joiner}).
@@ -343,20 +341,14 @@ handle_cast({handle_changed_peers, Change}, State) ->
 handle_cast({set_nat_type, UpdatedNatType}, State=#state{}) ->
     {noreply, update_this_peer(State#state{nat_type=UpdatedNatType})};
 handle_cast({unregister_session, SessionPubKeyBin}, State=#state{sessions=Sessions}) ->
-    case sets:is_element(SessionPubKeyBin, Sessions) of
-        false ->
-            {noreply, State};
-        true ->
-            NewSessions = sets:del_element(SessionPubKeyBin, Sessions),
-            {noreply, update_this_peer(State#state{sessions=NewSessions})}
-    end;
-handle_cast({register_session, SessionPubKeyBin},
-            State=#state{sessions=Sessions}) ->
-    case sets:is_element(SessionPubKeyBin, Sessions) of
+    NewSessions = lists:delete(SessionPubKeyBin, Sessions),
+    {noreply, update_this_peer(State#state{sessions=NewSessions})};
+handle_cast({register_session, SessionPubKeyBin}, State=#state{sessions=Sessions}) ->
+    case lists:member(SessionPubKeyBin, Sessions) of
         true ->
             {noreply, State};
         false ->
-            NewSessions = sets:add_element(SessionPubKeyBin, Sessions),
+            NewSessions = [SessionPubKeyBin | Sessions],
             {noreply, update_this_peer(State#state{sessions=NewSessions})}
     end;
 handle_cast({unregister_listen_addr, ListenAddr}, State=#state{}) ->
@@ -427,7 +419,7 @@ get_async_signed_metadata(State=#state{}) ->
 mk_this_peer(State=#state{}) ->
     Result = libp2p_peer:from_map(#{ pubkey_bin => State#state.peerbook#peerbook.pubkey_bin,
                                      listen_addrs => State#state.listen_addrs,
-                                     connected => sets:to_list(State#state.sessions),
+                                     connected => State#state.sessions,
                                      nat_type => State#state.nat_type,
                                      network_id => State#state.peerbook#peerbook.network_id,
                                      signed_metadata => State#state.metadata},
@@ -464,24 +456,24 @@ update_this_peer(Result, State=#state{peer_timer=PeerTimer}) ->
 
 -spec handle_changed_peers(change_descriptor(), #state{}) -> #state{}.
 handle_changed_peers({add, ChangeAdd}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
-    %% Handle new entries and remove any "removed" entries
+    %% Handle new entries and remove any "removed" entries that are now in the add map
     NewAdd = maps:merge(Add, ChangeAdd),
-    NewRemove = sets:subtract(Remove, sets:from_list(maps:keys(ChangeAdd))),
+    NewRemove = lists:filter(fun(Entry) -> maps:is_key(Entry, NewAdd) end, Remove),
     State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}};
 handle_changed_peers({remove, ChangeRemove}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
-    NewAdd = maps:without(sets:to_list(ChangeRemove), Add),
-    NewRemove = sets:union(ChangeRemove, Remove),
+    NewAdd = maps:without(ChangeRemove, Add),
+    NewRemove = lists:merge(lists:sort(ChangeRemove), Remove),
     State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}}.
 
 -spec notify_peers(#state{}) -> #state{}.
 notify_peers(State=#state{notify_peers=Notify={{add, Add}, {remove, Remove}}, notify_group=NotifyGroup}) ->
-    case maps:size(Add) > 0 orelse sets:size(Remove) > 0 of
+    case maps:size(Add) > 0 orelse length(Remove) > 0 of
         true ->
             [Pid ! {changed_peers, Notify} || Pid <- pg2:get_members(NotifyGroup)];
         false -> ok
     end,
     erlang:send_after(State#state.notify_time, self(), notify_timeout),
-    State#state{notify_peers={{add, #{}}, {remove, sets:new()}}}.
+    State#state{notify_peers={{add, #{}}, {remove, []}}}.
 
 
 %% rocksdb has a bad spec that doesn't list corruption as a valid return
