@@ -264,7 +264,7 @@ peerbook_handle(Pid) ->
 
 start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin}) ->
     MetaDataFun = maps:get(metadata_fun, Opts, fun() -> #{} end),
-    NetworkID = maps:get(netowrk_id, Opts, <<>>),
+    NetworkID = maps:get(network_id, Opts, <<>>),
     gen_server:start_link(?MODULE,
                           Opts#{metadata_fun => MetaDataFun,
                                 network_id => NetworkID
@@ -469,7 +469,10 @@ handle_changed_peers({remove, ChangeRemove}, State=#state{notify_peers={{add, Ad
 notify_peers(State=#state{notify_peers=Notify={{add, Add}, {remove, Remove}}, notify_group=NotifyGroup}) ->
     case maps:size(Add) > 0 orelse length(Remove) > 0 of
         true ->
-            [Pid ! {changed_peers, Notify} || Pid <- pg2:get_members(NotifyGroup)];
+            case pg2:get_members(NotifyGroup) of
+                {error, _} -> ok;
+                Members -> [Pid ! {changed_peers, Notify} || Pid <- Members]
+            end;
         false -> ok
     end,
     erlang:send_after(State#state.notify_time, self(), notify_timeout),
