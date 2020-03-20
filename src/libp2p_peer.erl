@@ -17,9 +17,10 @@
 -type metadata() :: [{string(), binary()}].
 -export_type([peer/0, peer_map/0, nat_type/0]).
 
--export([from_map/2, encode/2, decode/1, verify/1,
+-export([from_map/2, encode/2, decode/1, encode_list/1, decode_list/1, verify/1,
          pubkey_bin/1, listen_addrs/1, connected_peers/1, nat_type/1, timestamp/1,
-         supersedes/2, is_stale/2, network_id/1, network_id_allowable/2]).
+         supersedes/2, is_stale/2, network_id/1, network_id_allowable/2,
+         has_private_ip/1, has_public_ip/1, is_dialable/1]).
 %% signed metadata
 -export([signed_metadata/1, signed_metadata_get/3]).
 %% metadata (unsigned!)
@@ -98,9 +99,9 @@ metadata(#libp2p_signed_peer_pb{metadata=Metadata}) ->
     Metadata.
 
 %% @doc Replaces the full metadata for a given peer
--spec metadata_set(peer(), metadata()) -> {ok, peer()} | {error, term()}.
+-spec metadata_set(peer(), metadata()) -> peer() | {error, term()}.
 metadata_set(Peer=#libp2p_signed_peer_pb{}, Metadata) when is_list(Metadata) ->
-    {ok, Peer#libp2p_signed_peer_pb{metadata=Metadata}}.
+    Peer#libp2p_signed_peer_pb{metadata=Metadata}.
 
 %% @doc Updates the metadata for a given peer with the given key/value
 %% pair. The `Key' is expected to be a string, while `Value' is
@@ -108,7 +109,7 @@ metadata_set(Peer=#libp2p_signed_peer_pb{}, Metadata) when is_list(Metadata) ->
 -spec metadata_put(peer(), string(), binary()) -> {ok, peer()} | {error, term()}.
 metadata_put(Peer=#libp2p_signed_peer_pb{}, Key, Value) when is_list(Key), is_binary(Value) ->
     Metadata = lists:keystore(Key, 1, metadata(Peer), {Key, Value}),
-    metadata_set(Peer, Metadata).
+    {ok, metadata_set(Peer, Metadata)}.
 
 %% @doc Gets the value for a stored `Key' in metadata. If not found,
 %% the `Default' is returned.
@@ -140,6 +141,29 @@ network_id_allowable(Peer, MyNetworkID) ->
     network_id(Peer) == MyNetworkID
     orelse libp2p_peer:network_id(Peer) == undefined
     orelse MyNetworkID == undefined.
+
+%% @doc Returns whether the peer is listening on a public, externally
+%% visible IP address.
+-spec has_public_ip(peer()) -> boolean().
+has_public_ip(Peer) ->
+    ListenAddresses = libp2p_peer:listen_addrs(Peer),
+    lists:any(fun libp2p_transport_tcp:is_public/1, ListenAddresses).
+
+%% @doc Returns whether the peer is publishing a RFC1918 address
+-spec has_private_ip(peer()) -> boolean().
+has_private_ip(Peer) ->
+    ListenAddresses = libp2p_peer:listen_addrs(Peer),
+    not lists:all(fun libp2p_transport_tcp:is_public/1, ListenAddresses).
+
+
+%% @doc Returns whether the peer is dialable. A peer is dialable if it
+%% has a public IP address or it is reachable via a relay address.
+is_dialable(Peer) ->
+    ListenAddrs = ?MODULE:listen_addrs(Peer),
+    lists:any(fun(Addr) ->
+                      libp2p_transport_tcp:is_public(Addr) orelse
+                          libp2p_relay:is_p2p_circuit(Addr)
+              end, ListenAddrs).
 
 %% @doc Returns whether a given peer is stale relative to a given
 %% stale delta time in milliseconds.
@@ -199,10 +223,24 @@ cleared_listen_addrs(Peer=#libp2p_signed_peer_pb{}) ->
 %% stripped from its metadata before encoding if `Strip' is `true'.
 -spec encode(peer(), Strip::boolean()) -> binary().
 encode(Msg=#libp2p_signed_peer_pb{}, true) ->
-    {ok, Stripped} = metadata_set(Msg, []),
+    Stripped = metadata_set(Msg, []),
     libp2p_peer_pb:encode_msg(Stripped);
 encode(Msg=#libp2p_signed_peer_pb{}, false) ->
     libp2p_peer_pb:encode_msg(Msg).
+
+%% @doc Encodes a given list of peer into a binary form. Since
+%% encoding lists is primarily used for gossipping peers around, this
+%% strips metadata from the peers as part of encoding.
+-spec encode_list([peer()]) -> [binary()].
+encode_list(List) ->
+    StrippedList = [metadata_set(P, []) || P <- List],
+    libp2p_peer_pb:encode_msg(#libp2p_peer_list_pb{peers=StrippedList}).
+
+%% @doc Decodes a given binary into a list of peers.
+-spec decode_list(binary()) -> {ok, [peer()]} | {error, term()}.
+decode_list(Bin) ->
+    List = libp2p_peer_pb:decode_msg(Bin, libp2p_peer_list_pb),
+    {ok, List#libp2p_peer_list_pb.peers}.
 
 %% @doc Decodes a given binary into a peer. Note that a decoded peer
 %% may not verify, so ensure to call `verify' before actually using

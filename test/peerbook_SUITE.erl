@@ -142,9 +142,7 @@ session_test(Config) ->
     %% confirm it's cleared
     ?assertAsync({ok, Peer} = libp2p_peerbook:get(Handle, PubKeyBin),
                  [] == libp2p_peer:connected_peers(Peer)),
-
     ok.
-
 
 get_put_test(Config) ->
     Handle = ?config(peerbook, Config),
@@ -156,6 +154,8 @@ get_put_test(Config) ->
     %% Add a peer beyond the self peer
     {ok, NewPeer} = mk_peer(#{}),
     ok = libp2p_peerbook:put(Handle, NewPeer),
+
+    {ok, NewPeer} = libp2p_peerbook:get(Handle, libp2p_peer:pubkey_bin(NewPeer)),
 
     %% Check is_key for self adnd new peer
     ?assert(libp2p_peerbook:is_key(Handle, PubKeyBin)),
