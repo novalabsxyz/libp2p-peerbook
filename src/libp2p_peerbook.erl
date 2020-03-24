@@ -45,7 +45,8 @@
           metadata_fun :: fun(() -> #{binary() => binary}),
           metadata = #{} :: map(),
           metadata_ref = undefined :: undefined | reference(),
-          sig_fun :: fun((binary()) -> binary())
+          sig_fun :: fun((binary()) -> binary()),
+          swarm_name :: atom()
         }).
 
 %%
@@ -305,19 +306,20 @@ set_nat_type(Handle=#peerbook{}, NatType) ->%
 %%
 %% Most functions int he peerbook can be done through a thread safe
 %% "handle". For the ones where state is involved the actual peerbook
-%% pid is required. Thisutility method gets the pid for a given
+%% pid is required. This utility method gets the pid for a given
 %% peerbook handle.
 -spec peerbook_pid(peerbook()) -> pid().
 peerbook_pid(#peerbook{tid = TID}) ->
     ets:lookup_element(TID, {?PEERBOOK_SERVICE, pid}, 2).
 
+
 %% @doc Get the handle for a peerbook pid.
 %%
-%% Most functions int he peerbook can be done through a thread safe
+%% Most functions in the peerbook can be done through a thread safe
 %% "handle". This utility method retrieves the handle, given the
-%% peerbook pid.
+%% peerbook pid
 -spec peerbook_handle(pid()) -> {ok, peerbook()} | {error, term()}.
-peerbook_handle(Pid) ->
+peerbook_handle(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, peerbook).
 
 %%
@@ -335,7 +337,13 @@ start_link(Opts = #{sig_fun := _SigFun, pubkey_bin := _PubKeyBin}) ->
 init(Opts = #{ sig_fun := SigFun,
                metadata_fun := MetaDataFun,
                network_id := NetworkID,
-               pubkey_bin := PubKeyBin }) ->
+               pubkey_bin := PubKeyBin}) ->
+
+    lager:debug("*** starting peerbook with opts ~p",[Opts]),
+    RegisterCallBackFun = maps:get(register_callback, Opts, undefined),
+    RegisterName = maps:get(register_name, Opts, undefined),
+
+
     erlang:process_flag(trap_exit, true),
     TID = case maps:get(tid, Opts, false) of
               false ->
@@ -381,12 +389,14 @@ init(Opts = #{ sig_fun := SigFun,
                                        network_id = NetworkID,
                                        stale_time = StaleTime},
                     ets:insert(TID, {{?PEERBOOK_SERVICE, handle}, Handle}),
+                    ok = maybe_do_callback(RegisterCallBackFun, RegisterName, Handle),
                     {ok, update_this_peer(MkState(Handle))}
             end;
         [{_, Handle}] ->
             %% we already got a handle in ETS
             {ok, update_this_peer(MkState(Handle))}
     end.
+
 
 %% @private
 handle_call(update_this_peer, _From, State) ->
@@ -413,7 +423,7 @@ handle_cast({register_session, SessionPubKeyBin}, State=#state{sessions=Sessions
             NewSessions = [SessionPubKeyBin | Sessions],
             {noreply, update_this_peer(State#state{sessions=NewSessions})}
     end;
-handle_cast({unregister_listen_addr, ListenAddr}, State=#state{}) ->
+handle_cast({unregister_listen_addr, ListenAddr}, State) ->
     ListenAddrs = lists:filter(fun(Addr) -> Addr /= ListenAddr end, State#state.listen_addrs),
     {noreply, update_this_peer(State#state{listen_addrs=ListenAddrs})};
 handle_cast({register_listen_addr, ListenAddr}, State=#state{}) ->
@@ -423,7 +433,8 @@ handle_cast({join_notify, JoinPid}, State=#state{notify_group=Group, notify_peer
     %% only allow a pid to join once
     case lists:member(JoinPid, pg2:get_members(Group)) of
         false ->
-            ok = pg2:join(Group, JoinPid);
+            ok = pg2:join(Group, JoinPid),
+            notify_peers(State);
         true ->
             ok
     end,
@@ -462,6 +473,12 @@ terminate(_Reason, State=#state{peerbook=#peerbook{tid = TID}}) ->
 %% Internal
 %%
 
+-spec maybe_do_callback(function(), atom, peerbook()) -> ok.
+maybe_do_callback(Fun, RegisterName, Handle)->
+    case is_function(Fun) of
+        true -> Fun(RegisterName, Handle);
+        false -> ok
+    end.
 
 -spec peer_allowable(peerbook(), libp2p_peer:peer()) -> boolean().
 peer_allowable(Handle=#peerbook{}, Peer) ->
@@ -494,16 +511,13 @@ mk_this_peer(State) ->
 update_this_peer(State0=#state{}) ->
     case unsafe_fetch_peer(State0#state.peerbook#peerbook.pubkey_bin, State0#state.peerbook) of
         {error, not_found} ->
-            lager:debug("*** peer not found, making new peer", []),
             {NewPeer, State} = mk_this_peer(State0),
-            lager:debug("*** new peer ~p", [NewPeer]),
             update_this_peer(NewPeer, get_async_signed_metadata(State));
         {ok, _} ->
             case mk_this_peer(State0) of
                 {{ok, NewPeer}, State} ->
                     update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
-                {{error, Error}, State} ->
-                    lager:debug("*** Failed to make peer: ~p", [Error]),
+                {{error, _Error}, State} ->
                     State
             end
     end.
