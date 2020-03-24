@@ -476,7 +476,7 @@ terminate(_Reason, State=#state{peerbook=#peerbook{tid = TID}}) ->
 -spec maybe_do_callback(function(), atom, peerbook()) -> ok.
 maybe_do_callback(Fun, RegisterName, Handle)->
     case is_function(Fun) of
-        true -> Fun(RegisterName, Handle);
+        true -> Fun(RegisterName, Handle), ok;
         false -> ok
     end.
 
@@ -536,13 +536,11 @@ update_this_peer(Result, State=#state{peer_timer=PeerTimer}) ->
 
 -spec handle_changed_peers(change_descriptor(), #state{}) -> #state{}.
 handle_changed_peers({add, ChangeAdd}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
-    lager:debug("handling changed peers",[]),
     %% Handle new entries and remove any "removed" entries that are now in the add map
     NewAdd = maps:merge(Add, ChangeAdd),
     NewRemove = lists:filter(fun(Entry) -> maps:is_key(Entry, NewAdd) end, Remove),
     State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}};
 handle_changed_peers({remove, ChangeRemove}, State=#state{notify_peers={{add, Add}, {remove, Remove}}}) ->
-    lager:debug("handling changed peers",[]),
     NewAdd = maps:without(ChangeRemove, Add),
     NewRemove = lists:merge(lists:sort(ChangeRemove), Remove),
     State#state{notify_peers={{add,  NewAdd}, {remove, NewRemove}}}.
