@@ -352,7 +352,7 @@ init(Opts = #{ sig_fun := SigFun,
 
     lager:debug("*** starting peerbook with opts ~p",[Opts]),
     RegisterCallBackFun = maps:get(register_callback, Opts, undefined),
-    RegisterName = maps:get(register_name, Opts, undefined),
+    RegisterRef = maps:get(register_ref, Opts, undefined),
 
 
     erlang:process_flag(trap_exit, true),
@@ -400,11 +400,12 @@ init(Opts = #{ sig_fun := SigFun,
                                        network_id = NetworkID,
                                        stale_time = StaleTime},
                     ets:insert(TID, {{?PEERBOOK_SERVICE, handle}, Handle}),
-                    ok = maybe_do_callback(RegisterCallBackFun, RegisterName, Handle),
+                    ok = maybe_do_callback(RegisterCallBackFun, RegisterRef, Handle),
                     {ok, update_this_peer(MkState(Handle))}
             end;
         [{_, Handle}] ->
             %% we already got a handle in ETS
+            ok = maybe_do_callback(RegisterCallBackFun, RegisterRef, Handle),
             {ok, update_this_peer(MkState(Handle))}
     end.
 
