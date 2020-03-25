@@ -20,7 +20,7 @@
 -export([from_map/2, encode/2, decode/1, encode_list/1, decode_list/1, verify/1,
          pubkey_bin/1, listen_addrs/1, connected_peers/1, nat_type/1, timestamp/1,
          supersedes/2, is_stale/2, network_id/1, network_id_allowable/2,
-         has_private_ip/1, has_public_ip/1, is_dialable/1]).
+         is_similar/2]).
 %% signed metadata
 -export([signed_metadata/1, signed_metadata_get/3]).
 %% metadata (unsigned!)
@@ -126,6 +126,21 @@ supersedes(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=ThisTimestamp}}
            #libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
     ThisTimestamp > OtherTimestamp.
 
+%% @doc Returns whether a given `Target' is mostly equal to an `Other'
+%% peer. Similarity means equality for all fields, except for the
+%% timestamp of the peers.
+-spec is_similar(Target::peer(), Other::peer()) -> boolean().
+is_similar(Target=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=TargetTimestamp}},
+           Other=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
+    %% TODO - which app should be managing this var below ?
+    TimeDiffMinutes = application:get_env(libp2p, similarity_time_diff_mins, 15),
+    TimestampSimilar = TargetTimestamp < (OtherTimestamp + timer:minutes(TimeDiffMinutes)),
+    pubkey_bin(Target) == pubkey_bin(Other)
+        andalso nat_type(Target) == nat_type(Other)
+        andalso network_id(Target) == network_id(Other)
+        andalso sets:from_list(listen_addrs(Target)) == sets:from_list(listen_addrs(Other))
+        andalso TimestampSimilar.
+
 %% @doc Returns the declared network id for the peer, if any
 -spec network_id(peer()) -> binary() | undefined.
 network_id(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{network_id = <<>>}}) ->
@@ -141,29 +156,6 @@ network_id_allowable(Peer, MyNetworkID) ->
     network_id(Peer) == MyNetworkID
     orelse libp2p_peer:network_id(Peer) == undefined
     orelse MyNetworkID == undefined.
-
-%% @doc Returns whether the peer is listening on a public, externally
-%% visible IP address.
--spec has_public_ip(peer()) -> boolean().
-has_public_ip(Peer) ->
-    ListenAddresses = libp2p_peer:listen_addrs(Peer),
-    lists:any(fun libp2p_transport_tcp:is_public/1, ListenAddresses).
-
-%% @doc Returns whether the peer is publishing a RFC1918 address
--spec has_private_ip(peer()) -> boolean().
-has_private_ip(Peer) ->
-    ListenAddresses = libp2p_peer:listen_addrs(Peer),
-    not lists:all(fun libp2p_transport_tcp:is_public/1, ListenAddresses).
-
-
-%% @doc Returns whether the peer is dialable. A peer is dialable if it
-%% has a public IP address or it is reachable via a relay address.
-is_dialable(Peer) ->
-    ListenAddrs = ?MODULE:listen_addrs(Peer),
-    lists:any(fun(Addr) ->
-                      libp2p_transport_tcp:is_public(Addr) orelse
-                          libp2p_relay:is_p2p_circuit(Addr)
-              end, ListenAddrs).
 
 %% @doc Returns whether a given peer is stale relative to a given
 %% stale delta time in milliseconds.

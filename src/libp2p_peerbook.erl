@@ -4,10 +4,11 @@
 -module(libp2p_peerbook).
 
 -include("libp2p_peerbook.hrl").
+-include("pb/libp2p_peer_pb.hrl").
 
 %% api
 -export([keys/1, values/1, put/2, get/2, is_key/2, remove/2,
-         random/1, random/2,
+         random/1, random/2, random/3,
          peerbook_pid/1, peerbook_handle/1,
          join_notify/2, leave_notify/2,
          stale_time/1, set_nat_type/2,
@@ -75,16 +76,18 @@
 %% returned
 -spec put(peerbook(), libp2p_peer:peer()) -> ok | {error, term()}.
 put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
-    PutValid = fun(PeerId, Peer) ->
+    PutValid = fun
+                   (PeerId, Peer, false) ->
                        store_peer(PeerId, Peer, Handle),
-                       %% Notify group of new peers
                        gen_server:cast(peerbook_pid(Handle), {handle_changed_peers,
-                                                              {add, #{PeerId => Peer}}})
+                                                              {add, #{PeerId => Peer}}});
+                   (PeerId, Peer, true) ->
+                       store_peer(PeerId, Peer, Handle)
                end,
     NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
     case unsafe_fetch_peer(NewPeerId, Handle) of
         {error, not_found} ->
-            PutValid(NewPeerId, NewPeer);
+            PutValid(NewPeerId, NewPeer, false);
         {ok, ExistingPeer} ->
             %% Only store peers that are not _this_ peer,
             %% are newer than what we have,
@@ -96,7 +99,8 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
                 andalso peer_allowable(Handle, NewPeer)
                 of
                 true ->
-                    PutValid(NewPeerId, NewPeer);
+                    IsSimilar = libp2p_peer:is_similar(NewPeer, ExistingPeer),
+                    PutValid(NewPeerId, NewPeer, IsSimilar);
                 false ->
                     {error, invalid}
             end
@@ -122,12 +126,15 @@ get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
     end.
 
 random(Peerbook) ->
-    random(Peerbook, [], 5).
+    random(Peerbook, [], 0, 5).
 
 random(Peerbook, Exclude) ->
-    random(Peerbook, Exclude, 5).
+    random(Peerbook, Exclude, 0, 5).
 
-random(Peerbook=#peerbook{store=Store}, Exclude, Tries) ->
+random(Peerbook, Exclude, MinConnCount) ->
+    random(Peerbook, Exclude, MinConnCount, 5).
+
+random(Peerbook=#peerbook{store=Store}, Exclude, MinConnCount, Tries) ->
     {ok, Iterator} = rocksdb:iterator(Store, []),
     {ok, FirstAddr = <<Start:(33*8)/integer-unsigned-big>>, FirstPeer} = rocksdb:iterator_move(Iterator, first),
     {ok, <<End:(33*8)/integer-unsigned-big>>, _} = rocksdb:iterator_move(Iterator, last),
@@ -166,9 +173,13 @@ random(Peerbook=#peerbook{store=Store}, Exclude, Tries) ->
                             RandLoop(rocksdb:iterator_move(Iterator, next), T - 1);
                         false ->
                             try libp2p_peer:decode(Bin) of
-                                {ok, Peer} ->
+                                {ok, #libp2p_signed_peer_pb{peer=#libp2p_peer_pb{connected=PeerConns}} = Peer}
+                                        when length(PeerConns) >= MinConnCount->
                                     rocksdb:iterator_close(Iterator),
-                                    {Addr, Peer}
+                                    {Addr, Peer};
+                                {ok, _Peer} ->
+                                    %% peer doesnt meet our minimum connection count requirements
+                                    RandLoop(rocksdb:iterator_move(Iterator, next), T - 1)
                             catch
                                 _:_ ->
                                     RandLoop(rocksdb:iterator_move(Iterator, next), T - 1)
