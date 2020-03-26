@@ -46,8 +46,7 @@
           metadata_fun :: fun(() -> #{binary() => binary}),
           metadata = #{} :: map(),
           metadata_ref = undefined :: undefined | reference(),
-          sig_fun :: fun((binary()) -> binary()),
-          swarm_name :: atom()
+          sig_fun :: fun((binary()) -> binary())
         }).
 
 %%
@@ -99,8 +98,8 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
                 andalso peer_allowable(Handle, NewPeer)
                 of
                 true ->
-                    IsSimilar = libp2p_peer:is_similar(NewPeer, ExistingPeer),
-                    PutValid(NewPeerId, NewPeer, IsSimilar);
+                    _IsSimilar = libp2p_peer:is_similar(NewPeer, ExistingPeer),
+                    PutValid(NewPeerId, NewPeer, false);
                 false ->
                     {error, invalid}
             end
@@ -529,11 +528,11 @@ update_this_peer(State0=#state{}) ->
         {ok, _OldPeer} ->
             case mk_this_peer(State0) of
                 {{ok, NewPeer}, State} ->
-                    %case libp2p_peer:is_similar(NewPeer, OldPeer) of
-                    %    true -> State;
-                    %    false ->
-                        update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
-                    %end;
+%%                    case libp2p_peer:is_similar(NewPeer, OldPeer) of
+%%                        true -> State;
+%%                        false ->
+                            update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
+%%                    end;
                 {{error, _Error}, State} ->
                     State
             end
