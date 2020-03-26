@@ -125,15 +125,16 @@ get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
             end
     end.
 
+-spec random(peerbook())-> false | {libp2p_crypto:pubkey_bin(), libp2p_peer:peer()}.
 random(Peerbook) ->
     random(Peerbook, [], 0, 5).
-
+-spec random(peerbook(), [libp2p_crypto:pubkey_bin()])-> false | {libp2p_crypto:pubkey_bin(), libp2p_peer:peer()}.
 random(Peerbook, Exclude) ->
     random(Peerbook, Exclude, 0, 5).
-
+-spec random(peerbook(), [libp2p_crypto:pubkey_bin()], integer())-> false | {libp2p_crypto:pubkey_bin(), libp2p_peer:peer()}.
 random(Peerbook, Exclude, MinConnCount) ->
     random(Peerbook, Exclude, MinConnCount, 5).
-
+-spec random(peerbook(), [libp2p_crypto:pubkey_bin()], integer(), integer())-> false | {libp2p_crypto:pubkey_bin(), libp2p_peer:peer()}.
 random(Peerbook=#peerbook{store=Store}, Exclude, MinConnCount, Tries) ->
     {ok, Iterator} = rocksdb:iterator(Store, []),
     {ok, FirstAddr = <<Start:(33*8)/integer-unsigned-big>>, FirstPeer} = rocksdb:iterator_move(Iterator, first),
@@ -330,7 +331,7 @@ peerbook_pid(#peerbook{tid = TID}) ->
 %% "handle". This utility method retrieves the handle, given the
 %% peerbook pid
 -spec peerbook_handle(pid()) -> {ok, peerbook()} | {error, term()}.
-peerbook_handle(Pid) when is_pid(Pid) ->
+peerbook_handle(Pid) ->
     gen_server:call(Pid, peerbook).
 
 %%
@@ -445,8 +446,8 @@ handle_cast({join_notify, JoinPid}, State=#state{notify_group=Group, notify_peer
     %% only allow a pid to join once
     case lists:member(JoinPid, pg2:get_members(Group)) of
         false ->
-            ok = pg2:join(Group, JoinPid),
-            notify_peers(State);
+            ok = pg2:join(Group, JoinPid);
+            %notify_peers(State);
         true ->
             ok
     end,
@@ -525,10 +526,14 @@ update_this_peer(State0=#state{}) ->
         {error, not_found} ->
             {NewPeer, State} = mk_this_peer(State0),
             update_this_peer(NewPeer, get_async_signed_metadata(State));
-        {ok, _} ->
+        {ok, _OldPeer} ->
             case mk_this_peer(State0) of
                 {{ok, NewPeer}, State} ->
-                    update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
+                    %case libp2p_peer:is_similar(NewPeer, OldPeer) of
+                    %    true -> State;
+                    %    false ->
+                        update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
+                    %end;
                 {{error, _Error}, State} ->
                     State
             end
