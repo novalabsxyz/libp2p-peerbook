@@ -18,6 +18,11 @@ all() ->
      signed_metadata_test
     ].
 
+setup() ->
+    application:ensure_all_started(lager),
+    lager:set_loglevel(lager_console_backend, debug),
+    lager:set_loglevel({lager_file_backend, "log/console.log"}, debug),
+    ok.
 
 start_peerbook(OptOverride, Config) ->
     #{public := PubKey, secret := PrivKey} = libp2p_crypto:generate_keys(ecc_compact),
@@ -34,19 +39,23 @@ start_peerbook(OptOverride, Config) ->
 
 
 init_per_testcase(heartbeat_test, Config) ->
+    setup(),
     %% have the peer refresh itself quickly and send out notifications
     %% quick
     start_peerbook(#{peer_time => 20,
                      notify_time => 20}, Config);
 init_per_testcase(notify_test, Config) ->
+    setup(),
     %% only send out notifications quickly
     start_peerbook(#{notify_time => 50}, Config);
 init_per_testcase(stale_test, Config) ->
+    setup(),
     %% Set stale time to something short
     StaleTime = 50,
     [{stale_time, StaleTime} |
      start_peerbook(#{stale_time => StaleTime}, Config)];
 init_per_testcase(signed_metadata_test, Config) ->
+    setup(),
     Tab = ets:new(signed_metadata_test, [set, public, {write_concurrency, true}]),
     Fun = fun() ->
                   case ets:lookup(Tab, metadata_fun) of
@@ -57,6 +66,7 @@ init_per_testcase(signed_metadata_test, Config) ->
     start_peerbook(#{metadata_fun => Fun, peer_time => 50 },
                    [{tab, Tab} | Config]);
 init_per_testcase(_, Config) ->
+    setup(),
     start_peerbook(#{}, Config).
 
 end_per_testcase(_, Config) ->

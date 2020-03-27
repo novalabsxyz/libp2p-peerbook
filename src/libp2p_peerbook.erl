@@ -23,7 +23,8 @@
                     store :: rocksdb:db_handle(),
                     pubkey_bin :: libp2p_crypto:pubkey_bin(),
                     network_id :: binary(),
-                    stale_time :: pos_integer()
+                    stale_time :: pos_integer(),
+                    seed_node  :: boolean()
                   }).
 -type peerbook() :: #peerbook{}.
 
@@ -47,6 +48,7 @@
           metadata = #{} :: map(),
           metadata_ref = undefined :: undefined | reference(),
           sig_fun :: fun((binary()) -> binary())
+
         }).
 
 %%
@@ -74,7 +76,10 @@
 %% as a changed peer. If the peer does not validate an error is
 %% returned
 -spec put(peerbook(), libp2p_peer:peer()) -> ok | {error, term()}.
-put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
+put(Handle, NewPeer) ->
+    put(Handle, NewPeer, false).
+-spec put(peerbook(), libp2p_peer:peer(), boolean()) -> ok | {error, term()}.
+put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer, Prevalidated) ->
     PutValid = fun
                    (PeerId, Peer, false) ->
                        store_peer(PeerId, Peer, Handle),
@@ -83,6 +88,7 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
                    (PeerId, Peer, true) ->
                        store_peer(PeerId, Peer, Handle)
                end,
+
     NewPeerId = libp2p_peer:pubkey_bin(NewPeer),
     case unsafe_fetch_peer(NewPeerId, Handle) of
         {error, not_found} ->
@@ -93,13 +99,13 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
             %% are not stale themselves
             case
                 NewPeerId /= ThisPeerId
-                andalso libp2p_peer:verify(NewPeer)
+                andalso peer_valid(NewPeer, Prevalidated)
                 andalso libp2p_peer:supersedes(NewPeer, ExistingPeer)
                 andalso peer_allowable(Handle, NewPeer)
                 of
                 true ->
-                    _IsSimilar = libp2p_peer:is_similar(NewPeer, ExistingPeer),
-                    PutValid(NewPeerId, NewPeer, false);
+                    IsSimilar = libp2p_peer:is_similar(NewPeer, ExistingPeer),
+                    PutValid(NewPeerId, NewPeer, IsSimilar);
                 false ->
                     {error, invalid}
             end
@@ -110,9 +116,10 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer) ->
 %% configured `stale_time', which means a previously available peer
 %% may not be available when requested again.
 -spec get(peerbook(), libp2p_crypto:pubkey_bin()) -> {ok, libp2p_peer:peer()} | {error, term()}.
-get(#peerbook{pubkey_bin=ThisPeerId}=Handle, ID) ->
+get(#peerbook{pubkey_bin=ThisPeerId, seed_node=SeedNode}=Handle, ID) ->
+    %% TODO - old peerbook checked for seednode, do we need same here?
     case unsafe_fetch_peer(ID, Handle) of
-        {error, not_found} when ID == ThisPeerId ->
+        {error, not_found} when ID == ThisPeerId, SeedNode == false  ->
             gen_server:call(peerbook_pid(Handle), update_this_peer, infinity),
             get(Handle, ID);
         {error, Error} ->
@@ -353,6 +360,7 @@ init(Opts = #{ sig_fun := SigFun,
     lager:debug("*** starting peerbook with opts ~p",[Opts]),
     RegisterCallBackFun = maps:get(register_callback, Opts, undefined),
     RegisterRef = maps:get(register_ref, Opts, undefined),
+    IsSeedNode = maps:get(seed_node, Opts, false),
 
 
     erlang:process_flag(trap_exit, true),
@@ -398,7 +406,8 @@ init(Opts = #{ sig_fun := SigFun,
                                        tid = TID,
                                        pubkey_bin = PubKeyBin,
                                        network_id = NetworkID,
-                                       stale_time = StaleTime},
+                                       stale_time = StaleTime,
+                                       seed_node  = IsSeedNode},
                     ets:insert(TID, {{?PEERBOOK_SERVICE, handle}, Handle}),
                     ok = maybe_do_callback(RegisterCallBackFun, RegisterRef, Handle),
                     {ok, update_this_peer(MkState(Handle))}
@@ -432,6 +441,7 @@ handle_cast({register_session, SessionPubKeyBin}, State=#state{sessions=Sessions
         true ->
             {noreply, State};
         false ->
+            lager:debug("registering session with key ~p", [SessionPubKeyBin]),
             NewSessions = [SessionPubKeyBin | Sessions],
             {noreply, update_this_peer(State#state{sessions=NewSessions})}
     end;
@@ -444,11 +454,8 @@ handle_cast({register_listen_addr, ListenAddr}, State=#state{}) ->
 handle_cast({join_notify, JoinPid}, State=#state{notify_group=Group, notify_peers=_Notify={{add, _Add}, {remove, _Remove}}}) ->
     %% only allow a pid to join once
     case lists:member(JoinPid, pg2:get_members(Group)) of
-        false ->
-            ok = pg2:join(Group, JoinPid);
-            %notify_peers(State);
-        true ->
-            ok
+        false -> ok = pg2:join(Group, JoinPid);
+        true -> ok
     end,
     {noreply, State};
 handle_cast(Msg, State) ->
@@ -520,19 +527,20 @@ mk_this_peer(State) ->
     {Result, State}.
 
 -spec update_this_peer(#state{}) -> #state{}.
+update_this_peer(State=#state{peerbook=#peerbook{seed_node=true}}) ->
+    State;
 update_this_peer(State0=#state{}) ->
     case unsafe_fetch_peer(State0#state.peerbook#peerbook.pubkey_bin, State0#state.peerbook) of
         {error, not_found} ->
             {NewPeer, State} = mk_this_peer(State0),
             update_this_peer(NewPeer, get_async_signed_metadata(State));
-        {ok, _OldPeer} ->
+        {ok, OldPeer} ->
             case mk_this_peer(State0) of
                 {{ok, NewPeer}, State} ->
-%%                    case libp2p_peer:is_similar(NewPeer, OldPeer) of
-%%                        true -> State;
-%%                        false ->
-                            update_this_peer({ok, NewPeer}, get_async_signed_metadata(State));
-%%                    end;
+                    case libp2p_peer:is_similar(NewPeer, OldPeer) of
+                        true ->  State;
+                        false -> update_this_peer({ok, NewPeer}, get_async_signed_metadata(State))
+                    end;
                 {{error, _Error}, State} ->
                     State
             end
@@ -568,7 +576,6 @@ notify_peers(State=#state{notify_peers=Notify={{add, Add}, {remove, Remove}}, no
             case pg2:get_members(NotifyGroup) of
                 {error, _} -> ok;
                 Members ->
-                    %% TODO - RFC related changes not merged here.  Need to revisit ??
                     [Pid ! {changed_peers, Notify} || Pid <- Members]
             end;
         false -> ok
@@ -631,3 +638,10 @@ store_peer(Key, Peer, #peerbook{store=Store}) ->
 delete_peer(ID, #peerbook{store=Store}) ->
     rocksdb:delete(Store, ID, []).
 
+%% if a peer has been prevalidated then we skip the verify
+%% and trust the caller has verified the signature
+-spec peer_valid(libp2p_peer:peer(), boolean())-> boolean().
+peer_valid(Peer, false = _PreValidated)->
+    libp2p_peer:verify(Peer);
+peer_valid(_Peer, true = _PreValidated)->
+    true.

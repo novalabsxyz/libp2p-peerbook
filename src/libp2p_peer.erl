@@ -139,6 +139,7 @@ is_similar(Target=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=TargetTi
         andalso nat_type(Target) == nat_type(Other)
         andalso network_id(Target) == network_id(Other)
         andalso sets:from_list(listen_addrs(Target)) == sets:from_list(listen_addrs(Other))
+        andalso sets:from_list(connected_peers(Target)) == sets:from_list(connected_peers(Other))
         andalso TimestampSimilar.
 
 %% @doc Returns the declared network id for the peer, if any
@@ -259,11 +260,15 @@ verify(Msg=#libp2p_signed_peer_pb{peer=Peer0=#libp2p_peer_pb{signed_metadata=MD}
 sign_peer(Peer0 = #libp2p_peer_pb{signed_metadata=MD}, SigFun) ->
     Peer = Peer0#libp2p_peer_pb{signed_metadata=lists:usort(MD)},
     EncodedPeer = libp2p_peer_pb:encode_msg(Peer),
-    case SigFun(EncodedPeer) of
+    try SigFun(EncodedPeer) of
         {error, Error} ->
             {error, Error};
         Signature ->
             {ok, #libp2p_signed_peer_pb{peer=Peer, signature=Signature}}
+    catch C:E ->
+            %% probably a timeout
+            lager:info("signing peer failed: ~p:~p", [C, E]),
+            {error, sign_failure}
     end.
 
 encode_map(Map) ->
