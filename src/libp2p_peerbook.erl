@@ -375,7 +375,8 @@ init(Opts = #{ sig_fun := SigFun,
     ok = filelib:ensure_dir(DataDir),
 
     %% Create unique peer notification group
-    GroupName = pg2:create([?PEERBOOK_SERVICE, make_ref()]),
+    GroupName = [?PEERBOOK_SERVICE, make_ref()],
+    lager:debug("creating groupname ~p", [GroupName]),
     ok = pg2:create(GroupName),
 
     %% Fire of the associated timeout to start the notify cycle
@@ -552,7 +553,8 @@ update_this_peer(Result, State=#state{peer_timer=PeerTimer}) ->
     NewPeerTimer = erlang:send_after(State#state.peer_time, self(), peer_timeout),
     NewState = State#state{peer_timer=NewPeerTimer},
     case Result of
-        {error, _Error} -> NewState;
+        {error, _Error} ->
+            NewState;
         {ok, NewPeer} ->
             store_peer(libp2p_peer:pubkey_bin(NewPeer), NewPeer, State#state.peerbook),
             handle_changed_peers({add, #{libp2p_peer:pubkey_bin(NewPeer) => NewPeer}}, NewState)
@@ -574,11 +576,13 @@ notify_peers(State=#state{notify_peers=Notify={{add, Add}, {remove, Remove}}, no
     case maps:size(Add) > 0 orelse length(Remove) > 0 of
         true ->
             case pg2:get_members(NotifyGroup) of
-                {error, _} -> ok;
+                {error, _} ->
+                    ok;
                 Members ->
                     [Pid ! {changed_peers, Notify} || Pid <- Members]
             end;
-        false -> ok
+        false ->
+            ok
     end,
     erlang:send_after(State#state.notify_time, self(), notify_timeout),
     State#state{notify_peers={{add, #{}}, {remove, []}}}.

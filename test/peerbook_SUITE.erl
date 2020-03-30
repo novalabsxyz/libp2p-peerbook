@@ -8,7 +8,7 @@
 all() ->
     [
      listen_addr_test,
-     session_test,
+     %%session_test,    test disabled as sessions are no longer to be managed here, TODO - finalise requirements here
      nat_type_test,
      get_put_test,
      blacklist_test,

@@ -139,7 +139,6 @@ is_similar(Target=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=TargetTi
         andalso nat_type(Target) == nat_type(Other)
         andalso network_id(Target) == network_id(Other)
         andalso sets:from_list(listen_addrs(Target)) == sets:from_list(listen_addrs(Other))
-        andalso sets:from_list(connected_peers(Target)) == sets:from_list(connected_peers(Other))
         andalso TimestampSimilar.
 
 %% @doc Returns the declared network id for the peer, if any
