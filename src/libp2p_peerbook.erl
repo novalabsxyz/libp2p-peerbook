@@ -117,7 +117,6 @@ put(Handle=#peerbook{pubkey_bin=ThisPeerId}, NewPeer, Prevalidated) ->
 %% may not be available when requested again.
 -spec get(peerbook(), libp2p_crypto:pubkey_bin()) -> {ok, libp2p_peer:peer()} | {error, term()}.
 get(#peerbook{pubkey_bin=ThisPeerId, seed_node=SeedNode}=Handle, ID) ->
-    %% TODO - old peerbook checked for seednode, do we need same here?
     case unsafe_fetch_peer(ID, Handle) of
         {error, not_found} when ID == ThisPeerId, SeedNode == false  ->
             gen_server:call(peerbook_pid(Handle), update_this_peer, infinity),
