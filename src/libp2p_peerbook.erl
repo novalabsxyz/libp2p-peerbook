@@ -644,7 +644,7 @@ delete_peer(ID, #peerbook{store=Store}) ->
 %% if a peer has been prevalidated then we skip the verify
 %% and trust the caller has verified the signature
 -spec peer_valid(libp2p_peer:peer(), boolean())-> boolean().
-peer_valid(Peer, false = _PreValidated)->
+peer_valid(Peer, PreValidated) when PreValidated == false->
     libp2p_peer:verify(Peer);
-peer_valid(_Peer, true = _PreValidated)->
+peer_valid(_Peer, _PreValidated)->
     true.

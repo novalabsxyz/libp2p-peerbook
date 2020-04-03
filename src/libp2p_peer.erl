@@ -223,7 +223,7 @@ encode(Msg=#libp2p_signed_peer_pb{}, false) ->
 %% @doc Encodes a given list of peer into a binary form. Since
 %% encoding lists is primarily used for gossipping peers around, this
 %% strips metadata from the peers as part of encoding.
--spec encode_list([peer()]) -> [binary()].
+-spec encode_list([libp2p_peer:peer()]) -> binary().
 encode_list(List) ->
     StrippedList = [metadata_set(P, []) || P <- List],
     libp2p_peer_pb:encode_msg(#libp2p_peer_list_pb{peers=StrippedList}).
