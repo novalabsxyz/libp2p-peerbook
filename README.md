@@ -1,3 +1,5 @@
+This repo is unused and has been archived. Please do not use it for any development projects.
+
 # libp2p-peerbook
 
 [![Build status](https://badge.buildkite.com/484cb26ebc1dd62f4003e4c20a70486b324074e7a1dee53b96.svg)](https://buildkite.com/helium/libp2p-peerbook)
