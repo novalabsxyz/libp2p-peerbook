@@ -17,9 +17,10 @@
 -type metadata() :: [{string(), binary()}].
 -export_type([peer/0, peer_map/0, nat_type/0]).
 
--export([from_map/2, encode/2, decode/1, verify/1,
+-export([from_map/2, encode/2, decode/1, encode_list/1, decode_list/1, verify/1,
          pubkey_bin/1, listen_addrs/1, connected_peers/1, nat_type/1, timestamp/1,
-         supersedes/2, is_stale/2, network_id/1, network_id_allowable/2]).
+         supersedes/2, is_stale/2, network_id/1, network_id_allowable/2,
+         is_similar/2]).
 %% signed metadata
 -export([signed_metadata/1, signed_metadata_get/3]).
 %% metadata (unsigned!)
@@ -98,9 +99,9 @@ metadata(#libp2p_signed_peer_pb{metadata=Metadata}) ->
     Metadata.
 
 %% @doc Replaces the full metadata for a given peer
--spec metadata_set(peer(), metadata()) -> {ok, peer()} | {error, term()}.
+-spec metadata_set(peer(), metadata()) -> peer() | {error, term()}.
 metadata_set(Peer=#libp2p_signed_peer_pb{}, Metadata) when is_list(Metadata) ->
-    {ok, Peer#libp2p_signed_peer_pb{metadata=Metadata}}.
+    Peer#libp2p_signed_peer_pb{metadata=Metadata}.
 
 %% @doc Updates the metadata for a given peer with the given key/value
 %% pair. The `Key' is expected to be a string, while `Value' is
@@ -108,7 +109,7 @@ metadata_set(Peer=#libp2p_signed_peer_pb{}, Metadata) when is_list(Metadata) ->
 -spec metadata_put(peer(), string(), binary()) -> {ok, peer()} | {error, term()}.
 metadata_put(Peer=#libp2p_signed_peer_pb{}, Key, Value) when is_list(Key), is_binary(Value) ->
     Metadata = lists:keystore(Key, 1, metadata(Peer), {Key, Value}),
-    metadata_set(Peer, Metadata).
+    {ok, metadata_set(Peer, Metadata)}.
 
 %% @doc Gets the value for a stored `Key' in metadata. If not found,
 %% the `Default' is returned.
@@ -124,6 +125,21 @@ metadata_get(Peer=#libp2p_signed_peer_pb{}, Key, Default) ->
 supersedes(#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=ThisTimestamp}},
            #libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
     ThisTimestamp > OtherTimestamp.
+
+%% @doc Returns whether a given `Target' is mostly equal to an `Other'
+%% peer. Similarity means equality for all fields, except for the
+%% timestamp of the peers.
+-spec is_similar(Target::peer(), Other::peer()) -> boolean().
+is_similar(Target=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=TargetTimestamp}},
+           Other=#libp2p_signed_peer_pb{peer=#libp2p_peer_pb{timestamp=OtherTimestamp}}) ->
+    %% TODO - which app should be managing this var below ?
+    TimeDiffMinutes = application:get_env(libp2p, similarity_time_diff_mins, 15),
+    TimestampSimilar = TargetTimestamp < (OtherTimestamp + timer:minutes(TimeDiffMinutes)),
+    pubkey_bin(Target) == pubkey_bin(Other)
+        andalso nat_type(Target) == nat_type(Other)
+        andalso network_id(Target) == network_id(Other)
+        andalso sets:from_list(listen_addrs(Target)) == sets:from_list(listen_addrs(Other))
+        andalso TimestampSimilar.
 
 %% @doc Returns the declared network id for the peer, if any
 -spec network_id(peer()) -> binary() | undefined.
@@ -199,10 +215,24 @@ cleared_listen_addrs(Peer=#libp2p_signed_peer_pb{}) ->
 %% stripped from its metadata before encoding if `Strip' is `true'.
 -spec encode(peer(), Strip::boolean()) -> binary().
 encode(Msg=#libp2p_signed_peer_pb{}, true) ->
-    {ok, Stripped} = metadata_set(Msg, []),
+    Stripped = metadata_set(Msg, []),
     libp2p_peer_pb:encode_msg(Stripped);
 encode(Msg=#libp2p_signed_peer_pb{}, false) ->
     libp2p_peer_pb:encode_msg(Msg).
+
+%% @doc Encodes a given list of peer into a binary form. Since
+%% encoding lists is primarily used for gossipping peers around, this
+%% strips metadata from the peers as part of encoding.
+-spec encode_list([libp2p_peer:peer()]) -> binary().
+encode_list(List) ->
+    StrippedList = [metadata_set(P, []) || P <- List],
+    libp2p_peer_pb:encode_msg(#libp2p_peer_list_pb{peers=StrippedList}).
+
+%% @doc Decodes a given binary into a list of peers.
+-spec decode_list(binary()) -> {ok, [peer()]} | {error, term()}.
+decode_list(Bin) ->
+    List = libp2p_peer_pb:decode_msg(Bin, libp2p_peer_list_pb),
+    {ok, List#libp2p_peer_list_pb.peers}.
 
 %% @doc Decodes a given binary into a peer. Note that a decoded peer
 %% may not verify, so ensure to call `verify' before actually using
@@ -229,11 +259,15 @@ verify(Msg=#libp2p_signed_peer_pb{peer=Peer0=#libp2p_peer_pb{signed_metadata=MD}
 sign_peer(Peer0 = #libp2p_peer_pb{signed_metadata=MD}, SigFun) ->
     Peer = Peer0#libp2p_peer_pb{signed_metadata=lists:usort(MD)},
     EncodedPeer = libp2p_peer_pb:encode_msg(Peer),
-    case SigFun(EncodedPeer) of
+    try SigFun(EncodedPeer) of
         {error, Error} ->
             {error, Error};
         Signature ->
             {ok, #libp2p_signed_peer_pb{peer=Peer, signature=Signature}}
+    catch C:E ->
+            %% probably a timeout
+            lager:info("signing peer failed: ~p:~p", [C, E]),
+            {error, sign_failure}
     end.
 
 encode_map(Map) ->
